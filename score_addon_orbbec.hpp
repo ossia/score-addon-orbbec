@@ -25,4 +25,6 @@ private:
   std::vector<score::InterfaceBase*> factories(
       const score::ApplicationContext& ctx,
       const score::InterfaceKey& key) const override;
+
+  score::GUIApplicationPlugin *make_guiApplicationPlugin(const score::GUIApplicationContext &app);
 };
