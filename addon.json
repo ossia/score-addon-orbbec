@@ -1,0 +1,11 @@
+{
+  "src": "<url to the .zip file created by the release script>",
+  "name": "My Device",
+  "raw_name": "score-addon-my-device",
+  "version": "1.0",
+  "kind": "addon",
+  "short": "Test device add-on",
+  "long": "This addon provides an example device",
+  "small": "https://raw.githubusercontent.com/OSSIA/score-addon-tutorial/master/Deployment/icon.png",
+  "key": "5cce887c-2ee7-4d06-9675-30d6afe6b1aa"
+}
