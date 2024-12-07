@@ -1,17 +1,8 @@
 #pragma once
 
-#include <Device/Protocol/DeviceInterface.hpp>
-#include <Device/Protocol/DeviceSettings.hpp>
-
 #include <Gfx/GfxInputDevice.hpp>
 #include <Gfx/SharedInputSettings.hpp>
-
-#include <ossia/gfx/texture_parameter.hpp>
-#include <ossia/network/base/device.hpp>
-#include <ossia/network/base/protocol.hpp>
-
-#include <QLineEdit>
-
+class QLineEdit;
 class QComboBox;
 namespace Gfx::Orbbec {
 class InputFactory final : public SharedInputProtocolFactory

@@ -14,6 +14,7 @@
 class score_addon_orbbec final
     : public score::Plugin_QtInterface
     , public score::FactoryInterface_QtInterface
+    , public score::ApplicationPlugin_QtInterface
 {
   SCORE_PLUGIN_METADATA(1, "efc2818e-89c0-4741-b949-6c7cd82a1257")
 
@@ -26,5 +27,5 @@ private:
       const score::ApplicationContext& ctx,
       const score::InterfaceKey& key) const override;
 
-  score::GUIApplicationPlugin *make_guiApplicationPlugin(const score::GUIApplicationContext &app);
+  score::GUIApplicationPlugin *make_guiApplicationPlugin(const score::GUIApplicationContext &app) override;
 };
