@@ -1,64 +1,15 @@
 #include "OrbbecInputDevice.hpp"
-#include <Orbbec/ApplicationPlugin.hpp>
-#include <Orbbec/OrbbecInputStream.hpp>
 
 #include <Gfx/GfxApplicationPlugin.hpp>
 
-#include <QLabel>
-#include <QFormLayout>
-
-#include <wobjectimpl.h>
-/*
-#include <Device/Protocol/DeviceInterface.hpp>
-#include <Device/Protocol/DeviceSettings.hpp>
-
-
-#include <ossia/gfx/texture_parameter.hpp>
-#include <ossia/network/base/device.hpp>
-#include <ossia/network/base/protocol.hpp>
-#include <QLineEdit>
-*/
-
-
-/*
-
-#include <State/Widgets/AddressFragmentLineEdit.hpp>
-
-#include <Gfx/GfxExecContext.hpp>
-#include <Gfx/Graph/VideoNode.hpp>
-#include <Video/CameraInput.hpp>
-#include <Video/FrameQueue.hpp>
-#include <Video/GStreamerCompatibility.hpp>
-#include <Video/GpuFormats.hpp>
-#include <Video/VideoInterface.hpp>
-
-#include <score/serialization/MimeVisitor.hpp>
-
-#include <ossia/detail/flicks.hpp>
-#include <ossia/detail/fmt.hpp>
-#include <magic_enum/magic_enum.hpp>
-
-#include <ossia-qt/name_utils.hpp>
-
-#include <QComboBox>
-#include <QDebug>
-#include <QElapsedTimer>
 #include <QFormLayout>
 #include <QLabel>
-#include <QMenu>
-#include <QMimeData>
+
+#include <Orbbec/ApplicationPlugin.hpp>
+#include <Orbbec/OrbbecInputStream.hpp>
+#include <Orbbec/OrbbecProtocol.hpp>
 
 #include <wobjectimpl.h>
-
-#include <functional>
-
-extern "C" {
-#include <libavformat/avformat.h>
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libavutil/imgutils.h>
-}
-*/
 
 namespace Gfx::Orbbec
 {
@@ -74,8 +25,8 @@ private:
   bool reconnect() override;
   ossia::net::device_base* getDevice() const override { return m_dev.get(); }
 
-  Gfx::video_texture_input_protocol* m_protocol{};
-  mutable std::unique_ptr<Gfx::video_texture_input_device> m_dev;
+  ossia::net::protocol_base* m_protocol;
+  std::unique_ptr<ossia::net::device_base> m_dev;
 };
 
 }
@@ -104,6 +55,7 @@ bool InputDevice::reconnect()
 
       {
         auto deviceList = orbbec_app.orbbec.queryDeviceList();
+        qDebug() << "Count?" << (int)deviceList->deviceCount();
         // for(int i = 0; i < (int)deviceList->deviceCount(); i++)
         // {
         //   auto dev = deviceList->getDevice(i);
@@ -142,12 +94,10 @@ bool InputDevice::reconnect()
 
         }
       }
-      auto stream = std::make_shared<InputStream>(config, device);
-
-      m_protocol = new Gfx::video_texture_input_protocol{std::move(stream), plug->exec};
-      m_dev = std::make_unique<Gfx::video_texture_input_device>(
-          std::unique_ptr<ossia::net::protocol_base>(m_protocol),
-          this->settings().name.toStdString());
+      auto proto = std::make_unique<orbbec_protocol>(config, device, set);
+      m_protocol = proto.get();
+      m_dev = std::make_unique<orbbec_device>(
+          set, plug->exec, std::move(proto), this->settings().name.toStdString());
     }
   }
   catch(std::exception& e)
@@ -197,33 +147,64 @@ class OrbbecEnumerator : public Device::DeviceEnumerator
 {
 public:
   const score::GUIApplicationContext& context;
-  const ob::Context& orbbec;
+  const ApplicationPlugin& orbbec;
+  std::string connection_type;
 
-  explicit OrbbecEnumerator(const score::GUIApplicationContext& ctx)
+  explicit OrbbecEnumerator(
+      const score::GUIApplicationContext& ctx, std::string connection_type)
       : context{ctx}
-      , orbbec{ctx.guiApplicationPlugin<Orbbec::ApplicationPlugin>().orbbec}
+      , orbbec{ctx.guiApplicationPlugin<Orbbec::ApplicationPlugin>()}
+      , connection_type{connection_type}
   {
+    connect(
+        &orbbec, &ApplicationPlugin::deviceAdded, this,
+        [this](std::shared_ptr<ob::Device> dev) {
+      if(auto set = deviceInfo(dev))
+        deviceAdded(set->name, *set);
+    });
+    connect(
+        &orbbec, &ApplicationPlugin::deviceRemoved, this,
+        [this](std::shared_ptr<ob::Device> dev) { deviceRemoved(deviceName(dev)); });
+  }
+
+  static QString deviceName(std::shared_ptr<ob::Device> device)
+  {
+    return deviceName(device->getDeviceInfo());
+  }
+  static QString deviceName(std::shared_ptr<ob::DeviceInfo> deviceInfo)
+  {
+    auto name = QString("%1 (%2)")
+                    .arg(deviceInfo->getName())
+                    .arg(deviceInfo->getSerialNumber());
+    name.remove("orbbec ", Qt::CaseInsensitive);
+    return name;
+  }
+
+  std::optional<Device::DeviceSettings>
+  deviceInfo(std::shared_ptr<ob::Device> device) const
+  {
+    auto deviceInfo = device->getDeviceInfo();
+    qDebug() << "Got device: " << deviceInfo->connectionType();
+    if(deviceInfo->connectionType() != connection_type)
+      return std::nullopt;
+
+    Device::DeviceSettings set;
+    SharedInputSettings specif;
+    set.name = deviceName(deviceInfo);
+    set.protocol = InputFactory::static_concreteKey();
+    specif.path = deviceInfo->getSerialNumber();
+    set.deviceSpecificSettings = QVariant::fromValue(specif);
+    return set;
   }
 
   void enumerate(std::function<void(const QString&, const Device::DeviceSettings&)> f)
       const override
   {
-    auto deviceList = orbbec.queryDeviceList();
-    for(uint32_t index = 0, N = deviceList->getCount(); index < N; index++)
+    qDebug() << "oy: " << this->orbbec.m_known_devices.size();
+    for(auto& dev : this->orbbec.m_known_devices)
     {
-      auto device = deviceList->getDevice(index);
-      auto deviceInfo = device->getDeviceInfo();
-
-      Device::DeviceSettings set;
-      SharedInputSettings specif;
-      set.name = QString("%1 (%2)")
-                     .arg(deviceInfo->getName())
-                     .arg(deviceInfo->getSerialNumber());
-      set.name.remove("orbbec ", Qt::CaseInsensitive);
-      set.protocol = InputFactory::static_concreteKey();
-      specif.path = deviceInfo->getSerialNumber();
-      set.deviceSpecificSettings = QVariant::fromValue(specif);
-      f(set.name, set);
+      if(auto set = deviceInfo(dev))
+        f(set->name, *set);
     }
   }
 };
@@ -231,7 +212,15 @@ public:
 Device::DeviceEnumerators
 InputFactory::getEnumerators(const score::DocumentContext& ctx) const
 {
-  return {{"Cameras", new OrbbecEnumerator{ctx.app}}};
+
+  Device::DeviceEnumerators es;
+  for(const char* con :
+      {"USB", "USB1.0", "USB1.1", "USB2.0", "USB2.1", "USB3.0", "USB3.1", "USB3.2",
+       "Ethernet"})
+  {
+    es.push_back({con, new OrbbecEnumerator{ctx.app, con}});
+  }
+  return es;
 }
 
 Device::ProtocolSettingsWidget* InputFactory::makeSettingsWidget()

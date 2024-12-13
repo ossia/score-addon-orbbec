@@ -15,7 +15,7 @@ class PointCloudFilter;
 namespace Gfx::Orbbec
 {
 
-class InputStream final : public ::Video::ExternalInput
+class InputStream final
 {
 public:
   explicit InputStream(
@@ -23,38 +23,22 @@ public:
 
   ~InputStream() noexcept;
 
-  bool start() noexcept override;
-
-  void stop() noexcept override;
-
-  AVFrame* dequeue_frame() noexcept override;
-
-  void release_frame(AVFrame* frame) noexcept override;
-
   ::Video::FrameQueue m_rgb_frames;
   ::Video::FrameQueue m_depth_frames;
   ::Video::FrameQueue m_ir_frames;
   ::Video::FrameQueue m_pcl_frames;
+
+  bool start() noexcept;
+  void stop() noexcept;
+
 private:
-  const AVCodec* codecMJPEG = nullptr;
-  AVCodecContext* codecContextMJPEG = nullptr;
-
-  const AVCodec* codec264 = nullptr;
-  AVCodecContext* codecContext264 = nullptr;
-
-  const AVCodec* codec265 = nullptr;
-  AVCodecContext* codecContext265 = nullptr;
-
   void initH26XCodecs();
 
   AVFrame* decodeFrame(uint8_t * myData, int dataSize, OBFormat fmt);
 
-
   AVPixelFormat get_pixelfmt(OBFormat fmt);
 
   void on_data();
-
-
   std::atomic_bool m_running{};
 
   std::shared_ptr<ob::Config> m_config;
@@ -63,6 +47,30 @@ private:
   std::unique_ptr<ob::Pipeline> m_pipeline;
   std::mutex m_frames_mtx;
   std::shared_ptr<ob::FrameSet> m_frameset = nullptr;
+  const AVCodec* codecMJPEG = nullptr;
+  AVCodecContext* codecContextMJPEG = nullptr;
+
+  const AVCodec* codec264 = nullptr;
+  AVCodecContext* codecContext264 = nullptr;
+
+  const AVCodec* codec265 = nullptr;
+  AVCodecContext* codecContext265 = nullptr;
 };
 
+class InputStreamExtractor final : public ::Video::ExternalInput
+{
+public:
+  explicit InputStreamExtractor(
+      std::shared_ptr<InputStream> s, ::Video::FrameQueue& q) noexcept;
+  bool start() noexcept override;
+  void stop() noexcept override;
+
+  AVFrame* dequeue_frame() noexcept override;
+
+  void release_frame(AVFrame* frame) noexcept override;
+
+private:
+  std::shared_ptr<InputStream> m_stream;
+  ::Video::FrameQueue& m_queue;
+};
 }

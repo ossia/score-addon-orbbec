@@ -6,15 +6,23 @@
 namespace Gfx::Orbbec
 {
 
-InputStream::InputStream(std::shared_ptr<ob::Config> conf, std::shared_ptr<ob::Device> device) noexcept
+InputStream::InputStream(
+    std::shared_ptr<ob::Config> conf, std::shared_ptr<ob::Device> device) noexcept
     : m_config{conf}
     , m_device{device}
 {
-  realTime = true;
   initH26XCodecs();
   m_pipeline = std::make_unique<ob::Pipeline>();
   m_pointCloud = std::make_shared<ob::PointCloudFilter>();
   m_pointCloud->setCreatePointFormat(OB_FORMAT_RGB_POINT);
+}
+
+InputStreamExtractor::InputStreamExtractor(
+    std::shared_ptr<InputStream> s, ::Video::FrameQueue& q) noexcept
+    : m_stream{s}
+    , m_queue{q}
+{
+  realTime = true;
 }
 
 InputStream::~InputStream() noexcept { stop(); }
@@ -22,7 +30,7 @@ InputStream::~InputStream() noexcept { stop(); }
 bool InputStream::start() noexcept
 {
   if(m_running)
-    return false;
+    return true;
 
   m_pipeline->start(m_config, [&](std::shared_ptr<ob::FrameSet> output) {
     {
@@ -46,11 +54,28 @@ void InputStream::stop() noexcept
 
   // Remove frames that were in flight
   m_rgb_frames.drain();
+  m_ir_frames.drain();
+  m_depth_frames.drain();
+  m_pcl_frames.drain();
 }
 
-AVFrame *InputStream::dequeue_frame() noexcept { return m_rgb_frames.dequeue(); }
+bool InputStreamExtractor::start() noexcept
+{
+  return m_stream->start();
+}
+void InputStreamExtractor::stop() noexcept
+{
+  m_stream->stop();
+}
+AVFrame* InputStreamExtractor::dequeue_frame() noexcept
+{
+  return m_queue.dequeue();
+}
 
-void InputStream::release_frame(AVFrame *frame) noexcept { m_rgb_frames.release(frame); }
+void InputStreamExtractor::release_frame(AVFrame* frame) noexcept
+{
+  m_queue.release(frame);
+}
 
 void InputStream::initH26XCodecs()
 {
@@ -74,9 +99,7 @@ AVFrame *InputStream::decodeFrame(uint8_t *myData, int dataSize, OBFormat fmt){
   packet.data = myData;
   packet.size = dataSize;
 
-  // Allocate an AVFrame for decoded data
   AVFrame* frame = av_frame_alloc();
-
   AVCodecContext* codecContext{};
   switch(fmt)
   {
@@ -230,9 +253,26 @@ void InputStream::on_data()
     try {
       std::shared_ptr<ob::Frame> pointCloudFrame = m_pointCloud->process(m_frameset);
       auto* points = reinterpret_cast<const OBColorPoint*>(pointCloudFrame->getData());
-      const auto N =  pointCloudFrame->getDataSize() / double(sizeof(OBColorPoint));
+      const auto bytes = pointCloudFrame->getDataSize();
+      const auto N = bytes / double(sizeof(OBColorPoint));
 
-      qDebug() << magic_enum::enum_name(pointCloudFrame->getFormat()) << N;
+      AVFrame* frame = av_frame_alloc();
+      frame->buf[0] = av_buffer_alloc(bytes);
+      frame->data[0] = frame->buf[0]->data;
+      memcpy(frame->data[0], points, bytes);
+
+      frame->linesize[0] = pointCloudFrame->getDataSize();
+      if(pointCloudFrame->getFormat() == OBFormat::OB_FORMAT_RGB_POINT)
+      {
+        frame->format = 0x585954a3; // 'XYZC';
+      }
+      else
+      {
+        frame->format = 0x58595400; // 'XYZ\0';
+      }
+      m_pcl_frames.enqueue(frame);
+
+      //qDebug() << magic_enum::enum_name(pointCloudFrame->getFormat()) << N;
       // pointCloudToMesh(m_frameset->depthFrame(), m_frameset->colorFrame());
     }
     catch(std::exception &e) {
