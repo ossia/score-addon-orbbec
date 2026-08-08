@@ -44,13 +44,13 @@ jobs:
             }
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: "recursive"
           path: addon
 
       - name: Checkout score
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ossia/score
           submodules: "recursive"
