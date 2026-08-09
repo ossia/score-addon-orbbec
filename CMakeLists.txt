@@ -6,7 +6,7 @@ if(NOT (WIN32 OR APPLE OR LINUX))
 endif()
 
 if(NOT TARGET score_lib_base)
-  include("${SCORE_SOURCE_DIR}/cmake/ScoreExternalAddon.cmake")
+  include(ScoreExternalAddon)
 endif()
 
 project(score_addon_orbbec LANGUAGES CXX)
