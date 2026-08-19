@@ -14,7 +14,7 @@ InputStream::InputStream(
   initH26XCodecs();
   m_pipeline = std::make_unique<ob::Pipeline>();
   m_pointCloud = std::make_shared<ob::PointCloudFilter>();
-  m_pointCloud->setCreatePointFormat(OB_FORMAT_RGB_POINT);
+  m_pointCloud->setCreatePointFormat(OB_FORMAT_POINT);
 }
 
 InputStreamExtractor::InputStreamExtractor(
@@ -138,61 +138,97 @@ AVPixelFormat InputStream::get_pixelfmt(OBFormat fmt)
   switch(fmt)
   {
     case OB_FORMAT_YUYV:
+      qDebug("orbbec:::: OB_FORMAT_YUYV");
+      return AVPixelFormat::AV_PIX_FMT_YUYV422;
     case OB_FORMAT_YUY2:
+      qDebug("orbbec:::: OB_FORMAT_YUY2");
+      return AVPixelFormat::AV_PIX_FMT_YUYV422;
     case OB_FORMAT_GRAY:
-      return AVPixelFormat::AV_PIX_FMT_YUYV422;
-      return AVPixelFormat::AV_PIX_FMT_YUYV422;
+      qDebug("orbbec:::: OB_FORMAT_GRAY");
+      return AVPixelFormat::AV_PIX_FMT_YUYV422; // .?????
     case OB_FORMAT_UYVY:
+      qDebug("orbbec:::: OB_FORMAT_UYVY");
       return AVPixelFormat::AV_PIX_FMT_UYVY422;
     case OB_FORMAT_NV12:
+      qDebug("orbbec:::: OB_FORMAT_NV12");
       return AVPixelFormat::AV_PIX_FMT_NV12;
     case OB_FORMAT_NV21:
+      qDebug("orbbec:::: OB_FORMAT_NV21");
       return AVPixelFormat::AV_PIX_FMT_NV21;
     case OB_FORMAT_Y16:
+      qDebug("orbbec:::: OB_FORMAT_Y16");
+      return AVPixelFormat::AV_PIX_FMT_GRAY16LE;
     case OB_FORMAT_RLE:
+      qDebug("orbbec:::: OB_FORMAT_RLE");
+      return AVPixelFormat::AV_PIX_FMT_GRAY16LE;
     case OB_FORMAT_RVL:
+      qDebug("orbbec:::: OB_FORMAT_RVL");
+      return AVPixelFormat::AV_PIX_FMT_GRAY16LE;
     case OB_FORMAT_Z16:
+      qDebug("orbbec:::: OB_FORMAT_Z16");
       return AVPixelFormat::AV_PIX_FMT_GRAY16LE;
 
     case OB_FORMAT_Y8:
+      qDebug("orbbec:::: OB_FORMAT_Y8");
       return AVPixelFormat::AV_PIX_FMT_GRAY8;
 
       // Y10..14: SDK will unpack into Y16 by default
     case OB_FORMAT_Y10:
+      qDebug("orbbec:::: OB_FORMAT_Y10");
       return AVPixelFormat::AV_PIX_FMT_GRAY16LE;
     case OB_FORMAT_Y12:
     case OB_FORMAT_YV12: // Y12: left / YV12: right
+      qDebug("orbbec:::: OB_FORMAT_YV12");
       return AVPixelFormat::AV_PIX_FMT_GRAY16LE;
     case OB_FORMAT_Y14:
+      qDebug("orbbec:::: OB_FORMAT_Y14");
       return AVPixelFormat::AV_PIX_FMT_GRAY16LE;
 
     case OB_FORMAT_I420:
+      qDebug("orbbec:::: OB_FORMAT_I420");
       return AVPixelFormat::AV_PIX_FMT_YUV420P;
     case OB_FORMAT_RGB:
+      qDebug("orbbec:::: OB_FORMAT_RGB");
       return AV_PIX_FMT_RGB24;
     case OB_FORMAT_BGR:
+      qDebug("orbbec:::: OB_FORMAT_BGR");
       return AV_PIX_FMT_BGR24;
     case OB_FORMAT_BGRA:
+      qDebug("orbbec:::: OB_FORMAT_BGRA");
       return AV_PIX_FMT_BGRA;
     case OB_FORMAT_RGBA:
+      qDebug("orbbec:::: OB_FORMAT_RGBA");
       return AV_PIX_FMT_RGBA;
 
     case OB_FORMAT_BYR2: // V4L2_PIX_FMT_SBGGR8 / bayer
       return AV_PIX_FMT_BAYER_BGGR8;
 
     case OB_FORMAT_UNKNOWN:
+      qDebug("orbbec:::: OB_FORMAT_UNKNOWN"); break;
     case OB_FORMAT_MJPG:
+      qDebug("orbbec:::: OB_FORMAT_MJPG"); break;
     case OB_FORMAT_Y11:
+      qDebug("orbbec:::: OB_FORMAT_Y11"); break;
     case OB_FORMAT_H264:
+      qDebug("orbbec:::: OB_FORMAT_H264"); break;
     case OB_FORMAT_H265:
+      qDebug("orbbec:::: OB_FORMAT_H265"); break;
     case OB_FORMAT_HEVC:
+      qDebug("orbbec:::: OB_FORMAT_HEVC"); break;
     case OB_FORMAT_ACCEL:
+      qDebug("orbbec:::: OB_FORMAT_ACCEL"); break;
     case OB_FORMAT_GYRO:
+      qDebug("orbbec:::: OB_FORMAT_GYRO"); break;
     case OB_FORMAT_POINT:
+      qDebug("orbbec:::: OB_FORMAT_POINT"); break;
     case OB_FORMAT_RGB_POINT:
+      qDebug("orbbec:::: OB_FORMAT_RGB_POINT"); break;
     case OB_FORMAT_COMPRESSED:
+      qDebug("orbbec:::: OB_FORMAT_COMPRESSED"); break;
     case OB_FORMAT_BA81: // V4L2_PIX_FMT_SBGGR8 / bayer... but orbbec doc says "Is same as Y8, using for right ir stream" ???
+      qDebug("orbbec:::: OB_FORMAT_BA81"); break;
     case OB_FORMAT_RW16:
+      qDebug("orbbec:::: OB_FORMAT_RW16"); break;
     default:
       return AV_PIX_FMT_NONE;
   }
@@ -245,32 +281,53 @@ void InputStream::on_data()
 
   }
 
+  if(auto ir = m_frameset->irFrame())
+  {
+    auto pixfmt = get_pixelfmt(ir->getFormat());
+
+  }
   /// Handle depth frame and pcl
   if(auto depth = m_frameset->depthFrame())
   {
+    auto pixfmt = get_pixelfmt(depth->getFormat());
     auto depthValueScale = m_frameset->depthFrame()->getValueScale();
     m_pointCloud->setPositionDataScaled(depthValueScale);
     try {
       std::shared_ptr<ob::Frame> pointCloudFrame = m_pointCloud->process(m_frameset);
-      auto* points = reinterpret_cast<const OBColorPoint*>(pointCloudFrame->getData());
-      const auto bytes = pointCloudFrame->getDataSize();
-      const auto N = bytes / double(sizeof(OBColorPoint));
+      bool rgb = false;
 
-      AVFrame* frame = av_frame_alloc();
-      frame->buf[0] = av_buffer_alloc(bytes);
-      frame->data[0] = frame->buf[0]->data;
-      memcpy(frame->data[0], points, bytes);
-
-      frame->linesize[0] = pointCloudFrame->getDataSize();
-      if(pointCloudFrame->getFormat() == OBFormat::OB_FORMAT_RGB_POINT)
+      if(rgb)
       {
+        // FIXME crash in pointCloud::process in rgb mode, fine with depth
+        auto* points = reinterpret_cast<const OBColorPoint*>(pointCloudFrame->getData());
+        const auto bytes = pointCloudFrame->getDataSize();
+        const auto N = bytes / double(sizeof(OBColorPoint));
+
+        AVFrame* frame = av_frame_alloc();
+        frame->buf[0] = av_buffer_alloc(bytes);
+        frame->data[0] = frame->buf[0]->data;
+        memcpy(frame->data[0], points, bytes);
+
+        frame->linesize[0] = pointCloudFrame->getDataSize();
         frame->format = 0x585954a3; // 'XYZC';
+        m_pcl_frames.enqueue(frame);
       }
       else
       {
+        auto* points = reinterpret_cast<const OBPoint*>(pointCloudFrame->getData());
+        const auto bytes = pointCloudFrame->getDataSize();
+        const auto N = bytes / double(sizeof(OBPoint));
+
+        AVFrame* frame = av_frame_alloc();
+        frame->buf[0] = av_buffer_alloc(bytes);
+        frame->data[0] = frame->buf[0]->data;
+        memcpy(frame->data[0], points, bytes);
+
+        frame->linesize[0] = pointCloudFrame->getDataSize();
         frame->format = 0x58595400; // 'XYZ\0';
+        m_pcl_frames.enqueue(frame);
+
       }
-      m_pcl_frames.enqueue(frame);
 
       //qDebug() << magic_enum::enum_name(pointCloudFrame->getFormat()) << N;
       // pointCloudToMesh(m_frameset->depthFrame(), m_frameset->colorFrame());

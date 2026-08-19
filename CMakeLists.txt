@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.13 FATAL_ERROR)
-
 return()
 if(NOT (WIN32 OR APPLE OR LINUX))
   return()
@@ -48,6 +47,8 @@ target_link_libraries(score_addon_orbbec PUBLIC
     score_plugin_engine
     score_plugin_media
     score_plugin_gfx
+    score_plugin_avnd
+    score_plugin_threedim
     ob::OrbbecSDK
 )
 

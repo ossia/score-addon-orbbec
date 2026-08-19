@@ -11,17 +11,20 @@ namespace Gfx::Orbbec
 ApplicationPlugin::ApplicationPlugin(const score::GUIApplicationContext& ctx)
     : score::GUIApplicationPlugin{ctx}
 {
+  orbbec.enableNetDeviceEnumeration(true);
   orbbec.setDeviceChangedCallback([this](
                                       std::shared_ptr<ob::DeviceList> removedList,
                                       std::shared_ptr<ob::DeviceList> deviceList) {
     QMetaObject::invokeMethod(this, [this, removedList, deviceList] {
       for(uint32_t index = 0, N = deviceList->getCount(); index < N; index++)
       {
+        qDebug(" FOUND ORBBEC ");
         m_known_devices.push_back(deviceList->getDevice(index));
         deviceAdded(m_known_devices.back());
       }
       for(uint32_t index = 0, N = removedList->getCount(); index < N; index++)
       {
+        qDebug(" REMOVEDORBBEC ");
         ossia::remove_erase(m_known_devices, deviceList->getDevice(index));
         deviceRemoved(m_known_devices.back());
       }

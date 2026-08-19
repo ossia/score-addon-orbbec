@@ -51,21 +51,22 @@ bool InputDevice::reconnect()
     if(plug)
     {
       auto config = std::make_shared<ob::Config>();
-      auto device = std::shared_ptr<ob::Device>{};
+      auto device =
+          orbbec_app.orbbec.createNetDevice("192.168.0.12", 8090);//std::shared_ptr<ob::Device>{};
 
       {
         auto deviceList = orbbec_app.orbbec.queryDeviceList();
         qDebug() << "Count?" << (int)deviceList->deviceCount();
-        // for(int i = 0; i < (int)deviceList->deviceCount(); i++)
-        // {
-        //   auto dev = deviceList->getDevice(i);
-        //   auto dev_info = dev->getDeviceInfo();
-        //   if(dev_info->serialNumber() == set.path)
-        //   {
-        //     device = dev;
-        //     break;
-        //   }
-        // }
+         for(int i = 0; i < (int)deviceList->deviceCount(); i++)
+         {
+           auto dev = deviceList->getDevice(i);
+           auto dev_info = dev->getDeviceInfo();
+           if(dev_info->serialNumber() == set.path)
+           {
+             device = dev;
+             break;
+           }
+         }
 
         if(!device && deviceList->deviceCount() > 0)
           device = deviceList->getDevice(0);

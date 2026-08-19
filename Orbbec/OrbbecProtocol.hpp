@@ -34,7 +34,7 @@ public:
 
   void pull_texture(port_index idx) override
   {
-    context->setEdge(port_index{this->node_id, 0}, idx);
+    context->setEdge(port_index{this->node_id, 0}, idx, Process::CableType::ImmediateGlutton);
 
     score::gfx::Message m;
     m.node_id = node_id;
@@ -44,24 +44,50 @@ public:
   virtual ~orbbec_parameter() { context->ui->unregister_node(node_id); }
 };
 
+class orbbec_pcl_parameter : public ossia::gfx::geometry_parameter
+{
+  GfxExecutionAction* context{};
+
+public:
+  std::shared_ptr<InputStreamExtractor> decoder;
+  int32_t node_id{};
+  score::gfx::Node* node{};
+
+  orbbec_pcl_parameter(
+      const std::shared_ptr<InputStreamExtractor>& dec, bool pcl,
+      ossia::net::node_base& n, GfxExecutionAction& ctx);
+
+  void pull_geometry(port_index idx) override
+  {
+    context->setEdge(port_index{this->node_id, 0}, idx, Process::CableType::ImmediateGlutton);
+
+    score::gfx::Message m;
+    m.node_id = node_id;
+    context->ui->send_message(std::move(m));
+  }
+
+  virtual ~orbbec_pcl_parameter() { context->ui->unregister_node(node_id); }
+};
+
 class orbbec_node : public ossia::net::node_base
 {
   ossia::net::device_base& m_device;
   node_base* m_parent{};
-  std::unique_ptr<orbbec_parameter> m_parameter;
+  std::unique_ptr<ossia::net::parameter_base> m_parameter;
 
 public:
   orbbec_node(
       const std::shared_ptr<InputStreamExtractor>& settings, GfxExecutionAction& ctx,
       ossia::net::device_base& dev, std::string name)
       : m_device{dev}
-      , m_parameter{std::make_unique<orbbec_parameter>(
-            settings, name == "pointcloud", *this, ctx)}
+      , m_parameter{}
   {
+    if(name == "pointcloud") m_parameter = std::make_unique<orbbec_pcl_parameter>(settings, false, *this, ctx);
+    else m_parameter=  std::make_unique<orbbec_parameter>(settings, false, *this, ctx);
     m_name = std::move(name);
   }
 
-  orbbec_parameter* get_parameter() const override { return m_parameter.get(); }
+   ossia::net::parameter_base* get_parameter() const override { return m_parameter.get(); }
 
 private:
   ossia::net::device_base& get_device() const override { return m_device; }
