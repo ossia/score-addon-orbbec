@@ -1,0 +1,682 @@
+/*
+ * Intel RealSense backend: librealsense2 behind depthcam_abi.h.
+ *
+ * The closest fit of any SDK here: frames are refcounted (so zero-copy), the
+ * pipeline is push-based (so no thread of our own), rs2::align maps one-to-one
+ * onto our alignment modes, and vertices are already float metres.
+ */
+#include <depthcam_abi.h>
+
+#include <librealsense2/rs.hpp>
+
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+namespace
+{
+std::string g_last_error;
+std::mutex g_error_mutex;
+
+void set_error(const std::string& e)
+{
+  std::lock_guard lock{g_error_mutex};
+  g_last_error = e;
+}
+
+const char* backend_last_error()
+{
+  std::lock_guard lock{g_error_mutex};
+  return g_last_error.empty() ? nullptr : g_last_error.c_str();
+}
+
+std::unique_ptr<rs2::context> g_context;
+depthcam_changed_cb g_changed_cb = nullptr;
+void* g_changed_user = nullptr;
+
+int to_depthcam_format(rs2_format f)
+{
+  switch(f)
+  {
+    case RS2_FORMAT_RGB8:
+      return DEPTHCAM_FMT_RGB24;
+    case RS2_FORMAT_BGR8:
+      return DEPTHCAM_FMT_BGR24;
+    case RS2_FORMAT_RGBA8:
+      return DEPTHCAM_FMT_RGBA;
+    case RS2_FORMAT_BGRA8:
+      return DEPTHCAM_FMT_BGRA;
+    case RS2_FORMAT_YUYV:
+      return DEPTHCAM_FMT_YUYV422;
+    case RS2_FORMAT_UYVY:
+      return DEPTHCAM_FMT_UYVY422;
+    case RS2_FORMAT_Y8:
+      return DEPTHCAM_FMT_GRAY8;
+    case RS2_FORMAT_Y16:
+    case RS2_FORMAT_Z16:
+      return DEPTHCAM_FMT_GRAY16;
+    case RS2_FORMAT_MJPEG:
+      return DEPTHCAM_FMT_MJPEG;
+    default:
+      return DEPTHCAM_FMT_NONE;
+  }
+}
+
+struct Address
+{
+  enum Kind
+  {
+    Any,
+    Serial,
+    Index
+  } kind{Any};
+  std::string serial;
+  int index{0};
+};
+
+Address parse_uri(const char* uri)
+{
+  Address a;
+  if(!uri)
+    return a;
+  std::string s{uri};
+  if(s.rfind("realsense:", 0) == 0)
+    s = s.substr(10);
+  if(s.empty())
+    return a;
+
+  if(s.rfind("sn:", 0) == 0)
+  {
+    a.kind = Address::Serial;
+    a.serial = s.substr(3);
+  }
+  else if(s.rfind("index:", 0) == 0)
+  {
+    try
+    {
+      a.index = std::stoi(s.substr(6));
+      a.kind = Address::Index;
+    }
+    catch(...)
+    {
+    }
+  }
+  else
+  {
+    a.kind = Address::Serial;
+    a.serial = s;
+  }
+  if(a.kind == Address::Serial && a.serial.empty())
+    a.kind = Address::Any;
+  return a;
+}
+
+std::string info_of(const rs2::device& d, rs2_camera_info i)
+{
+  try
+  {
+    return d.supports(i) ? d.get_info(i) : std::string{};
+  }
+  catch(...)
+  {
+    return {};
+  }
+}
+
+struct EnumEntry
+{
+  std::string uri, name, serial, transport;
+};
+} // namespace
+
+// ---------------------------------------------------------------------------
+
+struct depthcam_device
+{
+  rs2::pipeline pipeline;
+  rs2::config config;
+  std::unique_ptr<rs2::align> align;
+  rs2::pointcloud pointcloud;
+
+  depthcam_open_config cfg{};
+  std::string serial;
+  bool color_pointcloud{};
+  std::atomic_bool running{};
+  float depth_scale_mm{1.f};
+
+  depthcam_frame_cb on_frame{};
+  void* user{};
+
+  std::vector<float> cloud_buf;
+
+  void handle(const rs2::frameset& fs);
+  void emitImage(uint32_t stream, const rs2::video_frame& f, float depth_unit);
+  void emitPointCloud(const rs2::frameset& fs);
+};
+
+namespace
+{
+/// Keeps a librealsense frame alive for exactly as long as the host holds its
+/// buffer. rs2::frame is refcounted, so this is a reference, not a copy.
+struct FrameHolder
+{
+  rs2::frame frame;
+};
+
+void release_frame_holder(void* owner)
+{
+  delete static_cast<FrameHolder*>(owner);
+}
+
+struct VectorHolder
+{
+  std::vector<float> data;
+};
+
+void release_vector_holder(void* owner)
+{
+  delete static_cast<VectorHolder*>(owner);
+}
+} // namespace
+
+void depthcam_device::emitImage(
+    uint32_t stream, const rs2::video_frame& f, float depth_unit)
+{
+  if(!f || !on_frame)
+    return;
+
+  const int format = to_depthcam_format(f.get_profile().format());
+  if(format == DEPTHCAM_FMT_NONE)
+    return;
+
+  auto* holder = new FrameHolder{f};
+
+  depthcam_frame out{};
+  out.stream = stream;
+  out.format = format;
+  out.width = f.get_width();
+  out.height = f.get_height();
+  out.stride = f.get_stride_in_bytes();
+  out.timestamp_ns = uint64_t(f.get_timestamp() * 1e6); // ms -> ns
+  out.data = f.get_data();
+  out.bytes = size_t(f.get_data_size());
+  out.depth_unit_mm = depth_unit;
+  out.owner = holder;
+  out.release = &release_frame_holder;
+
+  on_frame(&out, user);
+}
+
+void depthcam_device::emitPointCloud(const rs2::frameset& fs)
+{
+  if(!on_frame)
+    return;
+
+  auto depth = fs.get_depth_frame();
+  if(!depth)
+    return;
+
+  rs2::video_frame color = fs.get_color_frame();
+  if(color_pointcloud && !color)
+    return;
+
+  try
+  {
+    if(color_pointcloud)
+      pointcloud.map_to(color);
+
+    rs2::points pts = pointcloud.calculate(depth);
+    if(!pts)
+      return;
+
+    const size_t n = pts.size();
+    if(n == 0)
+      return;
+
+    const auto* verts = pts.get_vertices();
+    if(!verts)
+      return;
+
+    // Uncoloured: hand librealsense's own buffer over untouched. rs2::vertex is
+    // three floats in metres, which is exactly DEPTHCAM_FMT_XYZ.
+    if(!color_pointcloud)
+    {
+      static_assert(sizeof(rs2::vertex) == 3 * sizeof(float));
+
+      auto* holder = new FrameHolder{pts};
+
+      depthcam_frame out{};
+      out.stream = DEPTHCAM_STREAM_POINTCLOUD;
+      out.format = DEPTHCAM_FMT_XYZ;
+      out.point_count = int32_t(n);
+      out.timestamp_ns = uint64_t(depth.get_timestamp() * 1e6);
+      out.data = verts;
+      out.bytes = n * sizeof(rs2::vertex);
+      out.owner = holder;
+      out.release = &release_frame_holder;
+
+      on_frame(&out, user);
+      return;
+    }
+
+    // Coloured: librealsense gives texture coordinates rather than per-point
+    // colour, so the interleave has to be built here.
+    const auto* uvs = pts.get_texture_coordinates();
+    if(!uvs)
+      return;
+
+    const int cw = color.get_width();
+    const int ch = color.get_height();
+    const int cstride = color.get_stride_in_bytes();
+    const int cbpp = color.get_bytes_per_pixel();
+    const auto* cdata = static_cast<const uint8_t*>(color.get_data());
+    if(!cdata || cbpp < 3)
+      return;
+
+    const bool bgr = color.get_profile().format() == RS2_FORMAT_BGR8
+                     || color.get_profile().format() == RS2_FORMAT_BGRA8;
+
+    cloud_buf.clear();
+    cloud_buf.reserve(n * 6);
+
+    for(size_t i = 0; i < n; i++)
+    {
+      // z == 0 means no reading at that pixel.
+      if(verts[i].z == 0.f)
+        continue;
+
+      const int u = int(uvs[i].u * cw + 0.5f);
+      const int v = int(uvs[i].v * ch + 0.5f);
+      if(u < 0 || v < 0 || u >= cw || v >= ch)
+        continue;
+
+      cloud_buf.push_back(verts[i].x);
+      cloud_buf.push_back(verts[i].y);
+      cloud_buf.push_back(verts[i].z);
+
+      const uint8_t* p = cdata + size_t(v) * cstride + size_t(u) * cbpp;
+      if(bgr)
+      {
+        cloud_buf.push_back(p[2] / 255.f);
+        cloud_buf.push_back(p[1] / 255.f);
+        cloud_buf.push_back(p[0] / 255.f);
+      }
+      else
+      {
+        cloud_buf.push_back(p[0] / 255.f);
+        cloud_buf.push_back(p[1] / 255.f);
+        cloud_buf.push_back(p[2] / 255.f);
+      }
+    }
+
+    if(cloud_buf.empty())
+      return;
+
+    auto* holder = new VectorHolder{cloud_buf};
+
+    depthcam_frame out{};
+    out.stream = DEPTHCAM_STREAM_POINTCLOUD;
+    out.format = DEPTHCAM_FMT_XYZRGB;
+    out.point_count = int32_t(holder->data.size() / 6);
+    out.timestamp_ns = uint64_t(depth.get_timestamp() * 1e6);
+    out.data = holder->data.data();
+    out.bytes = holder->data.size() * sizeof(float);
+    out.owner = holder;
+    out.release = &release_vector_holder;
+
+    on_frame(&out, user);
+  }
+  catch(const rs2::error& e)
+  {
+    set_error(std::string{"point cloud: "} + e.what());
+  }
+  catch(...)
+  {
+  }
+}
+
+void depthcam_device::handle(const rs2::frameset& frames)
+{
+  if(!running.load(std::memory_order_acquire))
+    return;
+
+  rs2::frameset fs = frames;
+  if(align)
+    fs = align->process(fs);
+
+  // Each stream independently: a frameset without colour must still yield
+  // depth, IR and the point cloud.
+  if(cfg.streams & DEPTHCAM_STREAM_COLOR)
+    if(auto c = fs.get_color_frame())
+      emitImage(DEPTHCAM_STREAM_COLOR, c, 0.f);
+
+  if(cfg.streams & DEPTHCAM_STREAM_IR)
+    if(auto ir = fs.get_infrared_frame())
+      emitImage(DEPTHCAM_STREAM_IR, ir, 0.f);
+
+  if(cfg.streams & DEPTHCAM_STREAM_DEPTH)
+    if(auto d = fs.get_depth_frame())
+      emitImage(DEPTHCAM_STREAM_DEPTH, d, depth_scale_mm);
+
+  if(cfg.streams & DEPTHCAM_STREAM_POINTCLOUD)
+    emitPointCloud(fs);
+}
+
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+int backend_init(const char*)
+{
+  try
+  {
+    g_context = std::make_unique<rs2::context>();
+
+    g_context->set_devices_changed_callback(
+        [](rs2::event_information&) {
+      if(g_changed_cb)
+        g_changed_cb(g_changed_user);
+    });
+    return 1;
+  }
+  catch(const rs2::error& e)
+  {
+    set_error(e.what());
+    return 0;
+  }
+  catch(const std::exception& e)
+  {
+    set_error(e.what());
+    return 0;
+  }
+  catch(...)
+  {
+    return 0;
+  }
+}
+
+void backend_shutdown()
+{
+  g_changed_cb = nullptr;
+  g_changed_user = nullptr;
+  g_context.reset();
+}
+
+int backend_enumerate(depthcam_enumerate_cb cb, void* user)
+{
+  if(!g_context || !cb)
+    return 0;
+
+  try
+  {
+    // Metadata only; no pipeline is started.
+    for(auto&& d : g_context->query_devices())
+    {
+      EnumEntry e;
+      e.serial = info_of(d, RS2_CAMERA_INFO_SERIAL_NUMBER);
+      e.name = info_of(d, RS2_CAMERA_INFO_NAME);
+      e.transport = info_of(d, RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR);
+      if(e.name.empty())
+        e.name = "RealSense";
+      if(!e.transport.empty())
+        e.transport = "usb" + e.transport;
+
+      e.uri = e.serial.empty() ? std::string{"realsense:index:0"}
+                               : ("realsense:sn:" + e.serial);
+
+      depthcam_device_info info{};
+      info.backend = "realsense";
+      info.uri = e.uri.c_str();
+      info.name = e.name.c_str();
+      info.serial = e.serial.c_str();
+      info.transport = e.transport.c_str();
+      info.streams = DEPTHCAM_STREAM_COLOR | DEPTHCAM_STREAM_IR
+                     | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD;
+      cb(&info, user);
+    }
+    return 1;
+  }
+  catch(const rs2::error& e)
+  {
+    set_error(e.what());
+    return 0;
+  }
+  catch(...)
+  {
+    return 0;
+  }
+}
+
+void backend_set_changed_callback(depthcam_changed_cb cb, void* user)
+{
+  g_changed_cb = cb;
+  g_changed_user = user;
+}
+
+depthcam_device* backend_open(const char* uri, const depthcam_open_config* config)
+{
+  if(!g_context || !config)
+    return nullptr;
+
+  try
+  {
+    const auto addr = parse_uri(uri);
+
+    auto devices = g_context->query_devices();
+    if(devices.size() == 0)
+    {
+      set_error("no RealSense device connected");
+      return nullptr;
+    }
+
+    std::string serial;
+    switch(addr.kind)
+    {
+      case Address::Serial: {
+        for(auto&& d : devices)
+          if(info_of(d, RS2_CAMERA_INFO_SERIAL_NUMBER) == addr.serial)
+            serial = addr.serial;
+        if(serial.empty())
+        {
+          // No silent fallback to another camera.
+          set_error("RealSense '" + addr.serial + "' is not connected");
+          return nullptr;
+        }
+        break;
+      }
+      case Address::Index:
+        if(addr.index < 0 || addr.index >= int(devices.size()))
+        {
+          set_error("no RealSense at index " + std::to_string(addr.index));
+          return nullptr;
+        }
+        serial = info_of(devices[addr.index], RS2_CAMERA_INFO_SERIAL_NUMBER);
+        break;
+      case Address::Any:
+        serial = info_of(devices[0], RS2_CAMERA_INFO_SERIAL_NUMBER);
+        break;
+    }
+
+    auto dev = std::make_unique<depthcam_device>();
+    dev->cfg = *config;
+
+    const bool want_cloud = (config->streams & DEPTHCAM_STREAM_POINTCLOUD) != 0;
+    dev->color_pointcloud = want_cloud && config->color_pointcloud != 0
+                            && config->align != DEPTHCAM_ALIGN_NONE;
+
+    dev->serial = serial;
+    if(!serial.empty())
+      dev->config.enable_device(serial);
+
+    const bool need_color
+        = (config->streams & DEPTHCAM_STREAM_COLOR) || dev->color_pointcloud;
+    const bool need_depth = (config->streams & DEPTHCAM_STREAM_DEPTH) || want_cloud;
+
+    // 0 means "let the backend choose"; librealsense reads 0 the same way.
+    if(need_color)
+      dev->config.enable_stream(
+          RS2_STREAM_COLOR, config->color_width, config->color_height,
+          RS2_FORMAT_RGB8, config->color_fps);
+
+    if(need_depth)
+      dev->config.enable_stream(
+          RS2_STREAM_DEPTH, config->depth_width, config->depth_height,
+          RS2_FORMAT_Z16, config->depth_fps);
+
+    if(config->streams & DEPTHCAM_STREAM_IR)
+      dev->config.enable_stream(RS2_STREAM_INFRARED, 1);
+
+    switch(config->align)
+    {
+      case DEPTHCAM_ALIGN_DEPTH_TO_COLOR:
+        dev->align = std::make_unique<rs2::align>(RS2_STREAM_COLOR);
+        break;
+      case DEPTHCAM_ALIGN_COLOR_TO_DEPTH:
+        dev->align = std::make_unique<rs2::align>(RS2_STREAM_DEPTH);
+        break;
+      default:
+        break;
+    }
+
+    return dev.release();
+  }
+  catch(const rs2::error& e)
+  {
+    set_error(e.what());
+    return nullptr;
+  }
+  catch(const std::exception& e)
+  {
+    set_error(e.what());
+    return nullptr;
+  }
+  catch(...)
+  {
+    set_error("unknown error while opening the device");
+    return nullptr;
+  }
+}
+
+void backend_stop(depthcam_device* dev);
+
+void backend_close(depthcam_device* dev)
+{
+  if(!dev)
+    return;
+  backend_stop(dev);
+  delete dev;
+}
+
+int backend_start(depthcam_device* dev, depthcam_frame_cb on_frame, void* user)
+{
+  if(!dev)
+    return 0;
+  if(dev->running.load(std::memory_order_acquire))
+    return 1;
+
+  dev->on_frame = on_frame;
+  dev->user = user;
+  dev->running.store(true, std::memory_order_release);
+
+  const auto callback = [dev](const rs2::frame& f) {
+    try
+    {
+      if(auto fs = f.as<rs2::frameset>())
+        dev->handle(fs);
+    }
+    catch(...)
+    {
+      // Never let anything escape into librealsense's caller.
+    }
+  };
+
+  try
+  {
+    rs2::pipeline_profile profile;
+    try
+    {
+      profile = dev->pipeline.start(dev->config, callback);
+    }
+    catch(const rs2::error& e)
+    {
+      // The requested combination is unavailable. This is routine on USB2,
+      // where a D400 drops to a handful of low-rate profiles (a D435i on
+      // USB 2.1 offers colour only at 1080p@8 or 720p@15, and no 30fps colour
+      // at all), so the defaults a USB3 camera would accept simply do not
+      // exist. Let librealsense choose rather than failing outright.
+      set_error(
+          std::string{"requested stream configuration unavailable ("} + e.what()
+          + "); falling back to the camera's own defaults");
+
+      rs2::config fallback;
+      if(!dev->serial.empty())
+        fallback.enable_device(dev->serial);
+      profile = dev->pipeline.start(fallback, callback);
+    }
+
+    // get_depth_scale() is metres per unit; the ABI wants millimetres per unit.
+    try
+    {
+      auto ds = profile.get_device().first<rs2::depth_sensor>();
+      dev->depth_scale_mm = ds.get_depth_scale() * 1000.f;
+    }
+    catch(...)
+    {
+      dev->depth_scale_mm = 1.f;
+    }
+
+    return 1;
+  }
+  catch(const rs2::error& e)
+  {
+    set_error(e.what());
+    dev->running.store(false, std::memory_order_release);
+    return 0;
+  }
+  catch(const std::exception& e)
+  {
+    set_error(e.what());
+    dev->running.store(false, std::memory_order_release);
+    return 0;
+  }
+}
+
+void backend_stop(depthcam_device* dev)
+{
+  if(!dev)
+    return;
+  if(!dev->running.exchange(false, std::memory_order_acq_rel))
+    return;
+  try
+  {
+    dev->pipeline.stop();
+  }
+  catch(...)
+  {
+  }
+}
+
+const depthcam_backend_v1 g_backend{
+    .abi_version = DEPTHCAM_ABI_VERSION,
+    .name = "realsense",
+    .display_name = "Intel RealSense",
+    .last_error = &backend_last_error,
+    .init = &backend_init,
+    .shutdown = &backend_shutdown,
+    .enumerate = &backend_enumerate,
+    .set_changed_callback = &backend_set_changed_callback,
+    .open = &backend_open,
+    .close = &backend_close,
+    .start = &backend_start,
+    .stop = &backend_stop,
+};
+
+} // namespace
+
+extern "C" DEPTHCAM_EXPORT const depthcam_backend_v1* score_depthcam_backend_v1(void)
+{
+  return &g_backend;
+}

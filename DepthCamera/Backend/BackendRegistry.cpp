@@ -1,0 +1,279 @@
+#include "BackendRegistry.hpp"
+
+#include <ossia/detail/dylib_loader.hpp>
+
+#include <QCoreApplication>
+#include <QDebug>
+#include <QDir>
+#include <QFileInfo>
+#include <QSettings>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+namespace Gfx::DepthCamera
+{
+namespace
+{
+
+/// Folder containing this plug-in binary -- not the executable folder. Backends
+/// installed as packages sit beside their own SDK copies, far from score.
+QString thisBinaryFolder()
+{
+#if defined(_WIN32)
+  HMODULE mod{};
+  if(!GetModuleHandleExW(
+         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+             | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+         reinterpret_cast<LPCWSTR>(&thisBinaryFolder), &mod))
+    return {};
+  wchar_t path[MAX_PATH]{};
+  if(GetModuleFileNameW(mod, path, MAX_PATH) == 0)
+    return {};
+  return QFileInfo{QString::fromWCharArray(path)}.absolutePath();
+#else
+  Dl_info info{};
+  if(dladdr(reinterpret_cast<const void*>(&thisBinaryFolder), &info) == 0
+     || !info.dli_fname)
+    return {};
+  return QFileInfo{QString::fromUtf8(info.dli_fname)}.absolutePath();
+#endif
+}
+
+#if defined(_WIN32)
+constexpr auto backend_glob = "score_depthcam_*.dll";
+#elif defined(__APPLE__)
+constexpr auto backend_glob = "score_depthcam_*.dylib";
+#else
+constexpr auto backend_glob = "score_depthcam_*.so";
+#endif
+
+constexpr auto package_prefix = "score-depthcam-";
+
+}
+
+BackendRegistry::BackendRegistry() = default;
+BackendRegistry::~BackendRegistry() = default;
+
+BackendRegistry& BackendRegistry::instance()
+{
+  static BackendRegistry reg;
+  return reg;
+}
+
+QString BackendRegistry::backendOf(const QString& uri)
+{
+  const int colon = uri.indexOf(':');
+  return colon > 0 ? uri.left(colon) : QString{};
+}
+
+std::vector<QString> BackendRegistry::searchPaths() const
+{
+  std::vector<QString> paths;
+
+  // 1. Explicit override, for development and for unusual installs.
+  if(const auto env = qEnvironmentVariable("SCORE_DEPTHCAM_BACKEND_PATH");
+     !env.isEmpty())
+  {
+#if defined(_WIN32)
+    const auto sep = QLatin1Char(';');
+#else
+    const auto sep = QLatin1Char(':');
+#endif
+    for(const auto& p : env.split(sep, Qt::SkipEmptyParts))
+      paths.push_back(p);
+  }
+
+  // 2. Installed packages: <Library root>/packages/score-depthcam-*/
+  //    Read straight from QSettings rather than through Library::Settings so the
+  //    registry stays usable outside a document context.
+  if(const auto lib = QSettings{}.value("Library/RootPath").toString();
+     !lib.isEmpty())
+  {
+    const QDir packages{lib + "/packages"};
+    for(const auto& entry :
+        packages.entryList({QString{package_prefix} + "*"}, QDir::Dirs))
+    {
+      paths.push_back(packages.absoluteFilePath(entry));
+    }
+  }
+
+  // 3. Beside the plug-in, for a self-contained or bundled build.
+  if(const auto folder = thisBinaryFolder(); !folder.isEmpty())
+  {
+    paths.push_back(folder);
+    paths.push_back(folder + "/depthcam-backends");
+  }
+
+#if defined(SCORE_DEPTHCAM_BUILD_BACKEND_DIR)
+  // 4. The build tree.
+  paths.push_back(QStringLiteral(SCORE_DEPTHCAM_BUILD_BACKEND_DIR));
+#endif
+
+  return paths;
+}
+
+void BackendRegistry::onChanged(void* user)
+{
+  // Called from a backend thread. Just forward; the caller marshals.
+  if(auto* self = static_cast<BackendRegistry*>(user); self && self->m_changed)
+    self->m_changed();
+}
+
+void BackendRegistry::load()
+{
+  if(m_loaded)
+    return;
+  m_loaded = true;
+
+  QStringList seen;
+  for(const auto& dir_path : searchPaths())
+  {
+    QDir dir{dir_path};
+    if(!dir.exists())
+      continue;
+
+    for(const auto& file : dir.entryList({backend_glob}, QDir::Files))
+    {
+      const auto full = dir.absoluteFilePath(file);
+
+      // The same backend may be reachable through several search paths; the
+      // first one wins.
+      if(seen.contains(file))
+        continue;
+      seen << file;
+
+      std::unique_ptr<ossia::dylib_loader> lib;
+      try
+      {
+        lib = std::make_unique<ossia::dylib_loader>(full.toUtf8().constData());
+      }
+      catch(const std::exception& e)
+      {
+        qDebug() << "[depthcam] could not load" << full << ":" << e.what();
+        continue;
+      }
+
+      auto entry = lib->symbol<score_depthcam_backend_v1_fn>(
+          "score_depthcam_backend_v1");
+      if(!entry)
+      {
+        qDebug() << "[depthcam]" << full << "has no score_depthcam_backend_v1";
+        continue;
+      }
+
+      const depthcam_backend_v1* api = entry();
+      if(!api)
+        continue;
+
+      if(api->abi_version != DEPTHCAM_ABI_VERSION)
+      {
+        qDebug() << "[depthcam]" << full << "speaks ABI" << api->abi_version
+                 << "but this build expects" << DEPTHCAM_ABI_VERSION
+                 << "- skipping";
+        continue;
+      }
+
+      Backend b;
+      b.api = api;
+      b.name = QString::fromUtf8(api->name ? api->name : "");
+      b.display_name
+          = QString::fromUtf8(api->display_name ? api->display_name : api->name);
+      b.path = full;
+      // SDKs that load auxiliary blobs at runtime (the OrbbecSDK's extensions/
+      // tree, k4a's depth engine) get told where their own package lives.
+      b.resource_dir = dir.absolutePath();
+
+      if(api->init)
+      {
+        const auto res = b.resource_dir.toUtf8();
+        b.initialized = api->init(res.constData()) != 0;
+        if(!b.initialized)
+        {
+          const char* err = api->last_error ? api->last_error() : nullptr;
+          qDebug() << "[depthcam] backend" << b.name << "failed to initialise:"
+                   << (err ? err : "no reason given");
+          continue;
+        }
+      }
+
+      if(api->set_changed_callback)
+        api->set_changed_callback(&BackendRegistry::onChanged, this);
+
+      qDebug() << "[depthcam] loaded backend" << b.name << "from" << full;
+
+      // A backend can initialise successfully and still be unusable -- the k4a
+      // one stays registered when libk4a is absent so the browser can explain
+      // itself. Without this the only symptom is a camera silently missing from
+      // the device list.
+      if(api->last_error)
+        if(const char* err = api->last_error(); err && *err)
+          qDebug() << "[depthcam]  " << b.name << "reports:" << err;
+
+      m_libs.push_back(std::move(lib));
+      m_backends.push_back(std::move(b));
+    }
+  }
+
+  if(m_backends.empty())
+  {
+    qDebug() << "[depthcam] no camera backends found. Install one from the "
+                "package manager, or set SCORE_DEPTHCAM_BACKEND_PATH.";
+  }
+}
+
+void BackendRegistry::unload()
+{
+  for(auto& b : m_backends)
+  {
+    if(!b.api)
+      continue;
+    if(b.api->set_changed_callback)
+      b.api->set_changed_callback(nullptr, nullptr);
+    if(b.initialized && b.api->shutdown)
+      b.api->shutdown();
+  }
+  m_backends.clear();
+  m_libs.clear();
+  m_loaded = false;
+}
+
+const depthcam_backend_v1* BackendRegistry::find(const QString& backend) const noexcept
+{
+  for(const auto& b : m_backends)
+    if(b.name == backend)
+      return b.api;
+  return nullptr;
+}
+
+void BackendRegistry::enumerate(
+    const std::function<void(const depthcam_device_info&)>& f) const
+{
+  if(!f)
+    return;
+
+  for(const auto& b : m_backends)
+  {
+    if(!b.initialized || !b.api || !b.api->enumerate)
+      continue;
+
+    // The callback is a plain function pointer across the C boundary, so the
+    // std::function travels as the user pointer.
+    auto trampoline = [](const depthcam_device_info* info, void* user) {
+      if(info)
+        (*static_cast<const std::function<void(const depthcam_device_info&)>*>(user))(
+            *info);
+    };
+    b.api->enumerate(trampoline, const_cast<void*>(static_cast<const void*>(&f)));
+  }
+}
+
+void BackendRegistry::setChangedCallback(std::function<void()> f)
+{
+  m_changed = std::move(f);
+}
+
+}

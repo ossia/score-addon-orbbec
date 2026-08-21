@@ -1,0 +1,26 @@
+# Kinect v1 (Xbox 360 / Kinect for Windows) — udev rules for the score
+# depth-camera backend.
+#
+# The camera, audio and motor are separate USB interfaces and libfreenect claims
+# them independently, so all three need to be accessible.
+
+# Deliberately no ACTION!="add" guard: `udevadm trigger` fires *change*
+# events by default, so an add-only rule silently does nothing until the
+# camera is physically replugged -- and a later change event (a driver
+# rebind, a suspend/resume) would reset the permissions again.
+SUBSYSTEM!="usb", GOTO="score_freenect_end"
+
+# Xbox NUI Motor
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02b0", MODE="0666", TAG+="uaccess"
+# Xbox NUI Audio
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02ad", MODE="0666", TAG+="uaccess"
+# Xbox NUI Camera
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02ae", MODE="0666", TAG+="uaccess"
+# Kinect for Windows NUI Motor
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02c2", MODE="0666", TAG+="uaccess"
+# Kinect for Windows NUI Camera
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02be", MODE="0666", TAG+="uaccess"
+# Kinect for Windows NUI Audio
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02bf", MODE="0666", TAG+="uaccess"
+
+LABEL="score_freenect_end"

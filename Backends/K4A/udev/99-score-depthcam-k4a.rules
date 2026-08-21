@@ -1,0 +1,31 @@
+# Azure Kinect DK — udev rules for the score depth-camera backend.
+#
+# Not Microsoft's own 99-k4a.rules: that file does not work on a modern udev.
+# It opens with `BUS!="usb", ... SUBSYSTEM!=="usb_device"`, where BUS was removed
+# from udev years ago and `!==` is not a valid operator, and it assigns
+# GROUP="plugdev", a group that does not exist on Arch, Fedora or openSUSE --
+# when the group cannot be resolved udev discards the entire rule, MODE
+# included, so the device stays root-owned and the SDK reports no cameras.
+#
+# TAG+="uaccess" is the modern mechanism: systemd grants the locally logged-in
+# user access through an ACL. MODE="0666" is kept as a fallback for systems
+# without logind (headless installs, containers).
+
+# Deliberately no ACTION!="add" guard: `udevadm trigger` fires *change*
+# events by default, so an add-only rule silently does nothing until the
+# camera is physically replugged -- and a later change event (a driver
+# rebind, a suspend/resume) would reset the permissions again.
+SUBSYSTEM!="usb", GOTO="score_k4a_end"
+
+# Generic Superspeed USB Hub
+ATTR{idVendor}=="045e", ATTR{idProduct}=="097a", MODE="0666", TAG+="uaccess"
+# Generic USB Hub
+ATTR{idVendor}=="045e", ATTR{idProduct}=="097b", MODE="0666", TAG+="uaccess"
+# Azure Kinect Depth Camera
+ATTR{idVendor}=="045e", ATTR{idProduct}=="097c", MODE="0666", TAG+="uaccess"
+# Azure Kinect 4K Camera
+ATTR{idVendor}=="045e", ATTR{idProduct}=="097d", MODE="0666", TAG+="uaccess"
+# Azure Kinect Microphone Array
+ATTR{idVendor}=="045e", ATTR{idProduct}=="097e", MODE="0666", TAG+="uaccess"
+
+LABEL="score_k4a_end"

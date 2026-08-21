@@ -1,11 +1,10 @@
 {
-  "src": "<url to the .zip file created by the release script>",
-  "name": "My Device",
-  "raw_name": "score-addon-my-device",
+  "name": "Depth cameras",
+  "raw_name": "score-addon-orbbec",
   "version": "1.0",
   "kind": "addon",
-  "short": "Test device add-on",
-  "long": "This addon provides an example device",
-  "small": "https://raw.githubusercontent.com/OSSIA/score-addon-tutorial/master/Deployment/icon.png",
-  "key": "5cce887c-2ee7-4d06-9675-30d6afe6b1aa"
+  "short": "Orbbec and Kinect depth camera support",
+  "long": "Streams color, infrared, depth and point clouds from Orbbec cameras (Femto Mega/Bolt, Gemini, Astra) over USB and Ethernet.",
+  "key": "efc2818e-89c0-4741-b949-6c7cd82a1257",
+  "url": "https://github.com/jcelerier/score-addon-orbbec"
 }

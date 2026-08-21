@@ -1,0 +1,20 @@
+# Kinect v2 (Xbox One) — udev rules for the score depth-camera backend.
+#
+# Requires a USB3 port: on USB2 only the hub and the microphone array enumerate
+# and the cameras never appear at all, which looks identical to a permissions
+# problem.
+
+# Deliberately no ACTION!="add" guard: `udevadm trigger` fires *change*
+# events by default, so an add-only rule silently does nothing until the
+# camera is physically replugged -- and a later change event (a driver
+# rebind, a suspend/resume) would reset the permissions again.
+SUBSYSTEM!="usb", GOTO="score_freenect2_end"
+
+# Xbox NUI Sensor (bootloader)
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02c4", MODE="0666", TAG+="uaccess"
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02d8", MODE="0666", TAG+="uaccess"
+# Kinect for Windows v2
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02d9", MODE="0666", TAG+="uaccess"
+ATTR{idVendor}=="045e", ATTR{idProduct}=="02c4", MODE="0666", TAG+="uaccess"
+
+LABEL="score_freenect2_end"

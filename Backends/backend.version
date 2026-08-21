@@ -1,0 +1,14 @@
+/* Every backend exports exactly one symbol.
+ *
+ * --exclude-libs,ALL already hides what comes from static archives, but it does
+ * not cover objects compiled directly into the module -- and score loads
+ * everything in its support/ directory with RTLD_GLOBAL, which would put any
+ * stray export into the global namespace where a sibling backend could bind to
+ * it. A version script is the only way to state the guarantee outright.
+ */
+{
+  global:
+    score_depthcam_backend_v1;
+  local:
+    *;
+};

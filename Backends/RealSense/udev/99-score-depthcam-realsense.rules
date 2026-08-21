@@ -1,0 +1,15 @@
+# Intel RealSense — udev rules for the score depth-camera backend.
+#
+# Covers the D400 series, D500, L500/L515 and SR300. librealsense matches on the
+# Intel vendor id and its own product table; a vendor-wide rule is simpler and
+# is what librealsense's own config/99-realsense-libusb.rules does.
+#
+# Deliberately no ACTION!="add" guard: `udevadm trigger` fires *change* events
+# by default, so an add-only rule silently does nothing until the camera is
+# physically replugged.
+
+SUBSYSTEM!="usb", GOTO="score_realsense_end"
+
+ATTR{idVendor}=="8086", MODE="0666", TAG+="uaccess"
+
+LABEL="score_realsense_end"
