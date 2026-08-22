@@ -464,6 +464,9 @@ Notes on the vendored OrbbecSDK and what upgrading it would involve are in
 This addon is under the same licence as ossia score. The SDKs it builds against
 are not:
 
+Two of them are forked to carry memory-safety fixes AddressSanitizer found
+here; see `Documentation/sdk-forks.md`.
+
 | Component | Licence | Redistributable |
 |---|---|---|
 | OrbbecSDK v2 | MIT | yes |

@@ -3,10 +3,10 @@
 	url = https://github.com/jcelerier/OrbbecSDK_v2
 [submodule "3rdparty/libfreenect2"]
 	path = 3rdparty/libfreenect2
-	url = https://github.com/OpenKinect/libfreenect2
+	url = https://github.com/jcelerier/libfreenect2
 [submodule "3rdparty/libfreenect"]
 	path = 3rdparty/libfreenect
 	url = https://github.com/OpenKinect/libfreenect
 [submodule "3rdparty/librealsense"]
 	path = 3rdparty/librealsense
-	url = https://github.com/IntelRealSense/librealsense
+	url = https://github.com/jcelerier/librealsense
