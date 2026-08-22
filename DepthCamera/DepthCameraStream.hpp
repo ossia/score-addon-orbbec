@@ -55,6 +55,18 @@ public:
   bool start() noexcept;
   void stop() noexcept;
 
+  /// Stops and hands the camera back, leaving this object alive but inert.
+  ///
+  /// Exists because the last owner of an InputStream is not the device: the
+  /// graphics nodes hold the extractors, and score::gfx::GfxContext destroys a
+  /// node on a 100ms timer after it is unregistered, so waiting for the
+  /// shared_ptr to run out keeps the camera claimed for a moment after the
+  /// device is gone. That moment is enough to break the next open on any SDK
+  /// that claims the USB interface exclusively -- libk4a and libfreenect both
+  /// do -- which is what made an Azure Kinect come up with no picture until the
+  /// user hit Reconnect.
+  void close() noexcept;
+
   /// Each extractor registers on construction and votes once it is done: all
   /// four share one camera, so the first to go idle must not stop it.
   void registerExtractor() noexcept { m_extractors.fetch_add(1); }

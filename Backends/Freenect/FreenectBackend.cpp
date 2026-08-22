@@ -486,6 +486,24 @@ void backend_shutdown()
   }
 }
 
+/**
+ * @brief Is this serial actually an identity?
+ *
+ * A model 1473 and a Kinect for Windows have no camera serial: the descriptor
+ * reads "0000000000000000", and libfreenect substitutes the *audio* device's
+ * serial when it can reach it. It cannot always -- listing the devices resets
+ * the audio interface on those models (fnusb_keep_alive_led), so the very same
+ * camera enumerates as "A70775V03010249A" once and as all zeros a moment
+ * later. Anything stored in a document from the first listing then fails to
+ * open, which is exactly what "the camera vanished after I closed it" looked
+ * like.
+ */
+bool usable_serial(const std::string& s)
+{
+  return !s.empty()
+         && s.find_first_not_of('0') != std::string::npos;
+}
+
 int backend_enumerate(depthcam_enumerate_cb cb, void* user)
 {
   if(!g_ctx || !cb)
@@ -501,8 +519,8 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
   {
     EnumEntry e;
     e.serial = a->camera_serial ? a->camera_serial : "";
-    e.uri = e.serial.empty() ? ("freenect:index:" + std::to_string(i))
-                             : ("freenect:sn:" + e.serial);
+    e.uri = usable_serial(e.serial) ? ("freenect:sn:" + e.serial)
+                                    : ("freenect:index:" + std::to_string(i));
 
     depthcam_device_info info{};
     info.backend = "freenect";
@@ -539,19 +557,59 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
   dev->color_pointcloud = (config->streams & DEPTHCAM_STREAM_POINTCLOUD)
                           && config->color_pointcloud != 0;
 
+  // Resolved here rather than left to freenect_open_device_by_camera_serial,
+  // because on the models that have no camera serial that call is a coin toss;
+  // see usable_serial.
+  int index = addr.kind == Address::Index ? addr.index : 0;
+  if(addr.kind == Address::Serial)
+  {
+    freenect_device_attributes* attrs{};
+    const int n = freenect_list_device_attributes(g_ctx, &attrs);
+
+    int found = -1, unidentified = -1, unidentified_count = 0, i = 0;
+    for(auto* a = attrs; a; a = a->next, i++)
+    {
+      const std::string sn = a->camera_serial ? a->camera_serial : "";
+      if(sn == addr.serial)
+        found = i;
+      else if(!usable_serial(sn))
+      {
+        unidentified = i;
+        unidentified_count++;
+      }
+    }
+    if(attrs)
+      freenect_free_device_attributes(attrs);
+
+    if(found >= 0)
+    {
+      index = found;
+    }
+    else if(unidentified_count == 1 && n == 1)
+    {
+      // The one camera present cannot say who it is, and there is nothing else
+      // it could be confused with. Matching it is the only way an address saved
+      // from an earlier session keeps working on a 1473.
+      index = unidentified;
+    }
+    else if(n <= 0)
+    {
+      // Not "not connected": a Kinect whose camera interface is already claimed
+      // -- by another device in this document, or by another process -- drops
+      // out of the listing entirely.
+      set_error("no Kinect v1 available (already in use?)");
+      return nullptr;
+    }
+    else
+    {
+      set_error("Kinect v1 '" + addr.serial + "' is not connected");
+      return nullptr;
+    }
+  }
+
   const auto open_with = [&](freenect_device_flags flags) {
     freenect_select_subdevices(g_ctx, flags);
-    switch(addr.kind)
-    {
-      case Address::Serial:
-        return freenect_open_device_by_camera_serial(
-            g_ctx, &dev->dev, addr.serial.c_str());
-      case Address::Index:
-        return freenect_open_device(g_ctx, &dev->dev, addr.index);
-      case Address::Any:
-      default:
-        return freenect_open_device(g_ctx, &dev->dev, 0);
-    }
+    return freenect_open_device(g_ctx, &dev->dev, index);
   };
 
   // The motor is opt-in, and deliberately so.

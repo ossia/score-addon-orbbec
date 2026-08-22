@@ -34,6 +34,7 @@ public:
 private:
   bool reconnect() override;
   void disconnect() override;
+  Device::Node refresh() override;
   ossia::net::device_base* getDevice() const override { return m_dev.get(); }
 
   std::unique_ptr<ossia::net::device_base> m_dev;
@@ -51,6 +52,32 @@ InputDevice::~InputDevice()
   disconnect();
 }
 
+Device::Node InputDevice::refresh()
+{
+  Device::Node score_device{settings(), nullptr};
+
+  auto dev = getDevice();
+  if(!dev)
+    return score_device;
+
+  // Device::ToDeviceExplorer rather than GfxInputDevice::refresh().
+  //
+  // The gfx one copies only the node names, which is all a device with nothing
+  // but texture and geometry outputs has to say. The settings tree does have
+  // more to say -- a type, a range, an access mode, a current value -- and
+  // without those the explorer shows the controls as bare branches with no
+  // editor. The shared version reads all of it, and it skips parameters whose
+  // type has no editable value, so the streams still come out as before.
+  const auto& children = dev->get_root_node().children();
+  score_device.reserve(children.size());
+  for(const auto& node : children)
+    score_device.push_back(Device::ToDeviceExplorer(*node));
+
+  score_device.get<Device::DeviceSettings>().name
+      = QString::fromStdString(dev->get_name());
+  return score_device;
+}
+
 void InputDevice::disconnect()
 {
   // Before the base class, which clears the whole node tree: the settings tree
@@ -59,6 +86,20 @@ void InputDevice::disconnect()
     dev->releaseControls();
 
   GfxInputDevice::disconnect();
+
+  // And then let the device go. Device::DeviceInterface::disconnect() only
+  // clears the node tree, which leaves an object that reports itself connected
+  // (connected() is getDevice() != nullptr) while having no streams at all, and
+  // -- the part that actually bites -- still holding the camera open.
+  //
+  // That is what made an Azure Kinect show no picture until the user hit
+  // Reconnect once. reconnect() calls this, then opens the camera before
+  // assigning over m_dev, so the old handle was still there: k4a_device_open
+  // returns LIBUSB_ERROR_BUSY for a device this process already has open, the
+  // new device was never assigned, and reconnect() went on to return
+  // connected() == true because the *old* one was still sitting in m_dev.
+  // Score believed it had a camera; the camera had no nodes.
+  m_dev.reset();
 }
 
 bool InputDevice::reconnect()

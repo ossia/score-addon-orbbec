@@ -152,11 +152,16 @@ InputStream::InputStream(
 
 InputStream::~InputStream() noexcept
 {
+  close();
+  releaseCodecs();
+}
+
+void InputStream::close() noexcept
+{
   stop();
   if(m_device && m_backend && m_backend->close)
     m_backend->close(m_device);
   m_device = nullptr;
-  releaseCodecs();
 }
 
 bool InputStream::start() noexcept

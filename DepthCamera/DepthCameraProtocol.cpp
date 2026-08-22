@@ -372,7 +372,14 @@ depthcam_protocol::depthcam_protocol(
 {
 }
 
-depthcam_protocol::~depthcam_protocol() = default;
+depthcam_protocol::~depthcam_protocol()
+{
+  // Not left to the shared_ptr: see InputStream::close. This runs from
+  // ~generic_device, after the node tree is cleared, which is the last
+  // deterministic point in a device's life.
+  if(stream)
+    stream->close();
+}
 
 // The four hooks below only ever concern the `controls` subtree: the stream
 // parameters are textures and geometry, which the graphics graph pulls
