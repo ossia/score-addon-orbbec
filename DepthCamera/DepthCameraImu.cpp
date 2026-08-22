@@ -6,6 +6,7 @@
 #include <DepthCamera/DepthCameraStream.hpp>
 
 #include <cmath>
+#include <numbers>
 
 namespace Gfx::DepthCamera
 {
@@ -58,9 +59,12 @@ ImuTree::ImuTree(
       *root, "accel", "Acceleration in metres per second squared, including "
                       "gravity",
       16.f * 9.80665f, "distance.m/s2");
+  // std::numbers, not M_PI: MSVC does not define the POSIX math macros unless
+  // _USE_MATH_DEFINES was set before <cmath>, and this is the only place in the
+  // plug-in that needs one.
   m_gyro = makeVec3(
       *root, "gyro", "Angular velocity in radians per second",
-      float(2000. * M_PI / 180.), "");
+      float(2000. * std::numbers::pi / 180.), "");
 
   if(auto* node = root->create_child("temperature"))
   {

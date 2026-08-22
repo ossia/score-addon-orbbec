@@ -423,7 +423,10 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
     auto h = new QHBoxLayout{row};
     h->setContentsMargins(0, 0, 0, 0);
     h->addWidget(*w = makeSpin(8192, nullptr));
-    h->addWidget(new QLabel{QStringLiteral("×"), this});
+    // The codepoint rather than the character: score does not pass /utf-8 to
+    // MSVC, which then reads the source in the system codepage and renders the
+    // multiplication sign as mojibake.
+    h->addWidget(new QLabel{QString{QChar{0x00D7}}, this});
     h->addWidget(*h_ = makeSpin(8192, nullptr));
     h->addWidget(*fps = makeSpin(1000, " fps"));
     h->addStretch(1);
