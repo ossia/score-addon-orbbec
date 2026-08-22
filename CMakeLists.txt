@@ -85,12 +85,80 @@ if(NOT TARGET ob::OrbbecSDK)
   endif()
 endif()
 
-# Where backend libraries land in this build. At runtime the plug-in looks here
-# via $SCORE_DEPTHCAM_BACKEND_PATH, in its own package directory, and next to
-# its binary -- see BackendRegistry.
-set(SCORE_DEPTHCAM_BACKEND_DIR "${CMAKE_BINARY_DIR}/depthcam-backends" CACHE INTERNAL "")
+### --- The depth-camera package ----------------------------------------------
+###
+### Everything the backends need lands in one directory, laid out exactly as the
+### shipped package is, so that whatever works in the build tree works
+### installed. At runtime BackendRegistry looks for it in
+### <library root>/packages/depth-camera, beside the plug-in binary, and here.
+###
+### One package rather than one per SDK. The backends are a few megabytes each,
+### three of them need auxiliary files sitting next to them, and a user who
+### plugged in a camera should not have to work out which of five downloads
+### theirs is in.
+set(SCORE_DEPTHCAM_PACKAGE_NAME "depth-camera")
+set(SCORE_DEPTHCAM_BACKEND_DIR
+    "${CMAKE_BINARY_DIR}/${SCORE_DEPTHCAM_PACKAGE_NAME}" CACHE INTERNAL "")
 
 add_subdirectory(Backends)
+
+### The manifest score writes after installing a package, generated here so the
+### build tree is a valid package too.
+###
+### The architecture string has to match score::addonArchitecture() exactly:
+### that is the key the package manager looks up in the remote manifest to
+### decide which zip to download.
+if(WIN32)
+  set(SCORE_DEPTHCAM_OS "windows")
+elseif(APPLE)
+  set(SCORE_DEPTHCAM_OS "darwin")
+else()
+  set(SCORE_DEPTHCAM_OS "linux")
+endif()
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+  set(SCORE_DEPTHCAM_CPU "aarch64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7)")
+  set(SCORE_DEPTHCAM_CPU "arm")
+else()
+  set(SCORE_DEPTHCAM_CPU "x86_64")
+endif()
+
+set(SCORE_DEPTHCAM_ARCH "${SCORE_DEPTHCAM_OS}-${SCORE_DEPTHCAM_CPU}")
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deployment/package.json.in"
+  "${SCORE_DEPTHCAM_BACKEND_DIR}/package.json"
+  @ONLY)
+
+### `cmake --build . --target depthcam-package` produces the zip that goes in
+### the score-packages manifest. Named after the architecture because the
+### contents are native code: one entry per platform in the manifest, keyed the
+### way score::addonArchitecture() spells it.
+###
+### Staged and stripped rather than zipped in place. A release build of the
+### Orbbec backend is 139MB unstripped and 12MB stripped -- the SDK is compiled
+### into it -- and stripping the build tree itself would make the thing
+### undebuggable for whoever built it.
+set(SCORE_DEPTHCAM_STAGE "${CMAKE_BINARY_DIR}/depth-camera-stage")
+
+add_custom_target(depthcam-package
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "${SCORE_DEPTHCAM_STAGE}"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${SCORE_DEPTHCAM_BACKEND_DIR}"
+          "${SCORE_DEPTHCAM_STAGE}/${SCORE_DEPTHCAM_PACKAGE_NAME}"
+  COMMAND ${CMAKE_COMMAND}
+          -DDIR=${SCORE_DEPTHCAM_STAGE}/${SCORE_DEPTHCAM_PACKAGE_NAME}
+          -DSTRIP=${CMAKE_STRIP}
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/Deployment/StripPackage.cmake"
+  COMMAND ${CMAKE_COMMAND} -E rm -f
+          "${CMAKE_BINARY_DIR}/depth-camera-${SCORE_DEPTHCAM_ARCH}.zip"
+  COMMAND ${CMAKE_COMMAND} -E chdir "${SCORE_DEPTHCAM_STAGE}"
+          ${CMAKE_COMMAND} -E tar cf
+          "${CMAKE_BINARY_DIR}/depth-camera-${SCORE_DEPTHCAM_ARCH}.zip" --format=zip
+          "${SCORE_DEPTHCAM_PACKAGE_NAME}"
+  COMMENT "Packaging depth-camera-${SCORE_DEPTHCAM_ARCH}.zip"
+  VERBATIM)
 
 # General initialization
 score_common_setup()

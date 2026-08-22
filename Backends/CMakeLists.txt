@@ -167,18 +167,26 @@ if(TARGET ob::OrbbecSDK)
   score_depthcam_install_udev_rules(
     "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/scripts/env_setup")
 
-  # libOrbbecSDK is a shared library and the blobs under extensions/ are loaded
-  # at runtime, so both have to sit beside the backend -- in the build tree just
-  # as in a shipped package. Copying them here means the backend directory *is*
-  # the package layout, so anything that works in the build tree works installed.
+  # The blobs under extensions/ -- filters, frameprocessor, firmwareupdater --
+  # are dlopen'd by path at runtime and cannot be linked in by anyone, so they
+  # have to sit beside the backend, in the build tree exactly as in a shipped
+  # package. That is what makes the backend directory *be* the package layout:
+  # anything that works here works installed.
   add_custom_command(TARGET score_depthcam_orbbec POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:OrbbecSDK> "${SCORE_DEPTHCAM_BACKEND_DIR}/"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink
-            $<TARGET_FILE_NAME:OrbbecSDK> "${SCORE_DEPTHCAM_BACKEND_DIR}/$<TARGET_SONAME_FILE_NAME:OrbbecSDK>"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${SCORE_ORBBEC_RUNTIME_DIR}/extensions" "${SCORE_DEPTHCAM_BACKEND_DIR}/extensions"
     VERBATIM)
+
+  # libOrbbecSDK itself only when it was not built into the backend. 72MB of
+  # shared library that nothing loads is not something to ship.
+  if(NOT SCORE_DEPTHCAM_ORBBEC_STATIC)
+    add_custom_command(TARGET score_depthcam_orbbec POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_FILE:OrbbecSDK> "${SCORE_DEPTHCAM_BACKEND_DIR}/"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink
+              $<TARGET_FILE_NAME:OrbbecSDK> "${SCORE_DEPTHCAM_BACKEND_DIR}/$<TARGET_SONAME_FILE_NAME:OrbbecSDK>"
+      VERBATIM)
+  endif()
 
   if(TARGET extensions)
     add_dependencies(score_depthcam_orbbec extensions)

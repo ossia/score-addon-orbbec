@@ -51,7 +51,14 @@ constexpr auto backend_glob = "score_depthcam_*.dylib";
 constexpr auto backend_glob = "score_depthcam_*.so";
 #endif
 
-constexpr auto package_prefix = "score-depthcam-";
+/// The one package all the backends ship in.
+///
+/// Deliberately a single directory rather than one per SDK: the backends are a
+/// few megabytes each, several of them need auxiliary files next to them (the
+/// OrbbecSDK's extensions/ tree, k4a's depth engine), and a user who plugs in a
+/// camera wants it to work rather than to work out which of five packages they
+/// need.
+constexpr auto package_name = "depth-camera";
 
 }
 
@@ -87,25 +94,25 @@ std::vector<QString> BackendRegistry::searchPaths() const
       paths.push_back(p);
   }
 
-  // 2. Installed packages: <Library root>/packages/score-depthcam-*/
+  // 2. The installed package: <Library root>/packages/depth-camera/.
   //    Read straight from QSettings rather than through Library::Settings so the
-  //    registry stays usable outside a document context.
+  //    registry stays usable outside a document context -- the enumerators run
+  //    before any document exists.
   if(const auto lib = QSettings{}.value("Library/RootPath").toString();
      !lib.isEmpty())
   {
-    const QDir packages{lib + "/packages"};
-    for(const auto& entry :
-        packages.entryList({QString{package_prefix} + "*"}, QDir::Dirs))
-    {
-      paths.push_back(packages.absoluteFilePath(entry));
-    }
+    paths.push_back(lib + "/packages/" + package_name);
+
+    // And support/, which is where score puts a package whose manifest says
+    // kind: "support". Nothing forces the choice today, so both are searched.
+    paths.push_back(lib + "/support/" + package_name);
   }
 
   // 3. Beside the plug-in, for a self-contained or bundled build.
   if(const auto folder = thisBinaryFolder(); !folder.isEmpty())
   {
     paths.push_back(folder);
-    paths.push_back(folder + "/depthcam-backends");
+    paths.push_back(folder + "/" + package_name);
   }
 
 #if defined(SCORE_DEPTHCAM_BUILD_BACKEND_DIR)
