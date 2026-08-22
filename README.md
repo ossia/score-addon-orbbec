@@ -386,7 +386,19 @@ Requires the submodules:
 git clone --recursive https://github.com/jcelerier/score-addon-orbbec
 ```
 
-Backends build only when their submodule is present, and each can be turned off:
+The plug-in and the backends build independently. A checkout **without**
+submodules builds the plug-in alone — which is a complete, working device that
+says "no camera backend is installed" until a package is — and that is what
+score's own CI does, because cloning this repository recursively pulls four
+camera SDKs that take longer to build than the rest of score.
+
+```
+-DSCORE_DEPTHCAM_BUILD_BACKENDS=OFF   # plug-in only; the default with no submodules
+-DSCORE_DEPTHCAM_BUILD_BACKENDS=ON    # also build the SDKs; the default with them
+```
+
+Individual backends build only when their submodule is present, and each can be
+turned off:
 
 ```
 -DSCORE_DEPTHCAM_BUILD_FREENECT=OFF

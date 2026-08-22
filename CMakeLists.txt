@@ -1,29 +1,57 @@
-### Orbbec / depth camera support for ossia score.
+### Depth camera support for ossia score.
 ###
-### The OrbbecSDK is vendored as a submodule and built here rather than consumed
-### prebuilt on purpose: building it ourselves is what lets us keep its bundled
-### libusb / libuvc / libjpeg / spdlog copies hidden (the SDK's own
-### cmake/linux_config.cmake sets -fvisibility=hidden and -Wl,-Bsymbolic), so
-### they cannot be interposed by the other depth-camera SDKs we intend to load
-### into the same process later on.
+### Two halves that build independently:
+###
+###  - the **plug-in**, which links no camera SDK at all and is meant to be
+###    statically built into score. It reaches cameras only through
+###    DepthCamera/Backend/depthcam_abi.h, a pure-C ABI, and is a few hundred
+###    kilobytes.
+###  - the **backends**, one shared object per camera SDK, built from the
+###    vendored submodules and shipped as a downloadable package.
+###
+### score's own CI wants only the first: cloning this repository recursively
+### pulls the OrbbecSDK, libfreenect, libfreenect2 and librealsense, and
+### building them takes longer than the rest of score put together. So a
+### checkout without submodules builds the plug-in and nothing else -- which is
+### a complete, working device that reports "no camera backend is installed"
+### until a package is.
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
 if(NOT (WIN32 OR APPLE OR LINUX))
   return()
 endif()
 
-# The SDK is a submodule; a checkout without --recursive should skip the addon
-# rather than fail the whole score configure step.
-if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/OrbbecSDK_v2/CMakeLists.txt")
-  message(STATUS "score-addon-orbbec: 3rdparty/OrbbecSDK_v2 submodule not checked out, skipping")
-  return()
+### Whether to build the camera SDKs.
+###
+### Defaults to whether the submodules are actually there, so neither case
+### needs a flag: a recursive clone builds everything, score's CI clones
+### without submodules and builds the plug-in. Set it explicitly to override.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/OrbbecSDK_v2/CMakeLists.txt")
+  set(SCORE_DEPTHCAM_BACKENDS_DEFAULT ON)
+else()
+  set(SCORE_DEPTHCAM_BACKENDS_DEFAULT OFF)
 endif()
+
+option(SCORE_DEPTHCAM_BUILD_BACKENDS
+       "Build the camera SDK backends alongside the plug-in"
+       ${SCORE_DEPTHCAM_BACKENDS_DEFAULT})
 
 if(NOT TARGET score_lib_base)
   include("${SCORE_SOURCE_DIR}/cmake/ScoreExternalAddon.cmake")
 endif()
 
 project(score_addon_orbbec LANGUAGES C CXX)
+
+if(SCORE_DEPTHCAM_BUILD_BACKENDS
+   AND NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/OrbbecSDK_v2/CMakeLists.txt")
+  message(FATAL_ERROR
+    "score-addon-orbbec: SCORE_DEPTHCAM_BUILD_BACKENDS is on but "
+    "3rdparty/OrbbecSDK_v2 is not checked out. Run "
+    "`git submodule update --init --recursive`, or configure with "
+    "-DSCORE_DEPTHCAM_BUILD_BACKENDS=OFF to build the plug-in alone.")
+endif()
+
+if(SCORE_DEPTHCAM_BUILD_BACKENDS)
 
 # Where the SDK's extensions/ tree lands in this build. The addon needs to hand
 # this to ob::Context::setExtensionsDirectory() before any context is created,
@@ -32,6 +60,12 @@ project(score_addon_orbbec LANGUAGES C CXX)
 set(SCORE_ORBBEC_RUNTIME_DIR "${CMAKE_BINARY_DIR}/orbbec" CACHE INTERNAL "")
 
 ### --- Vendored OrbbecSDK -----------------------------------------------------
+###
+### Built here rather than consumed prebuilt on purpose: building it ourselves is
+### what lets us keep its bundled libusb / libuvc / libjpeg / spdlog copies
+### hidden (the SDK's own cmake/linux_config.cmake sets -fvisibility=hidden and
+### -Wl,-Bsymbolic), so they cannot be interposed by the other depth-camera SDKs
+### loaded into the same process.
 if(NOT TARGET ob::OrbbecSDK)
   # These are options() in the SDK, so they must be cache entries to take effect.
   set(OB_BUILD_EXAMPLES OFF CACHE INTERNAL "")
@@ -165,6 +199,8 @@ add_custom_target(depthcam-package
   COMMENT "Packaging depth-camera-${SCORE_DEPTHCAM_ARCH}.zip"
   VERBATIM)
 
+endif() # SCORE_DEPTHCAM_BUILD_BACKENDS
+
 # General initialization
 score_common_setup()
 
@@ -200,10 +236,15 @@ add_library(score_addon_orbbec
 target_include_directories(score_addon_orbbec
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/DepthCamera/Backend")
 
-target_compile_definitions(score_addon_orbbec
-  PRIVATE
-    SCORE_DEPTHCAM_BUILD_BACKEND_DIR="${SCORE_DEPTHCAM_BACKEND_DIR}"
-)
+# Only when there is a build tree to point at. Without it BackendRegistry looks
+# in the installed package directory and beside the plug-in binary, which is
+# exactly right for a plug-in built without backends.
+if(SCORE_DEPTHCAM_BUILD_BACKENDS)
+  target_compile_definitions(score_addon_orbbec
+    PRIVATE
+      SCORE_DEPTHCAM_BUILD_BACKEND_DIR="${SCORE_DEPTHCAM_BACKEND_DIR}"
+  )
+endif()
 
 # Link
 target_link_libraries(score_addon_orbbec PUBLIC
