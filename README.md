@@ -402,6 +402,15 @@ rests on: score `dlopen`s the contents of its package directories, on Linux with
 Writing a backend for another camera means implementing one header. Nothing on
 the score side is camera-specific.
 
+## Testing
+
+`Tests/` holds two suites: harnesses that drive a backend `.so` directly through
+the ABI, and scripts that drive score itself through its JS API. Both need real
+hardware; see [Tests/README.md](Tests/README.md).
+
+Notes on the vendored OrbbecSDK and what upgrading it would involve are in
+[Documentation/orbbec-sdk-upgrade.md](Documentation/orbbec-sdk-upgrade.md).
+
 ## Licences
 
 This addon is under the same licence as ossia score. The SDKs it builds against
