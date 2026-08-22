@@ -7,7 +7,9 @@
 #include <QString>
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <mutex>
 
 namespace Gfx::DepthCamera
 {
@@ -47,6 +49,10 @@ public:
   depthcam_device* device() const noexcept { return m_device; }
   const depthcam_backend_v1* backend() const noexcept { return m_backend; }
 
+  /// Bitmask of depthcam_stream: what the camera actually gave us, which is not
+  /// always what was asked for.
+  uint32_t activeStreams() const noexcept;
+
   StreamOutput m_rgb;
   StreamOutput m_depth;
   StreamOutput m_ir;
@@ -75,11 +81,25 @@ public:
   /// Millimetres per depth unit, as reported by the backend. 0 if unknown.
   std::atomic<float> depth_unit_mm{0.f};
 
+  using imu_callback = std::function<void(const depthcam_imu_sample&)>;
+
+  /**
+   * @brief Where inertial samples go.
+   *
+   * Called from the camera's own thread, hundreds of times a second, with the
+   * lock held -- which is what makes clearing it safe: setImuCallback({})
+   * returns only once no call is in flight, so the node tree it writes into
+   * cannot be freed underneath it. That matters because the callback outlives
+   * nothing: the stream is closed after the node tree is cleared, not before.
+   */
+  void setImuCallback(imu_callback cb) noexcept;
+
 private:
   static void onFrameThunk(const depthcam_frame* f, void* user);
   void onFrame(const depthcam_frame& f);
   void handleImage(StreamOutput& out, const depthcam_frame& f);
   void handlePointCloud(const depthcam_frame& f);
+  void handleImu(const depthcam_frame& f);
 
   AVFrame* decodeCompressed(const depthcam_frame& f);
   AVCodecContext* codecContext(AVCodecID id);
@@ -97,6 +117,9 @@ private:
   AVCodecContext* m_codec264{};
   AVCodecContext* m_codec265{};
   AVPacket* m_packet{};
+
+  std::mutex m_imu_mutex;
+  imu_callback m_imu_cb;
 };
 
 class InputStreamExtractor final : public ::Video::ExternalInput

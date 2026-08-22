@@ -191,6 +191,10 @@ struct depthcam_device
 {
   freenect_device* dev{};
 
+  /// Whether the host asked for inertial data. Only the accelerometer is
+  /// available, and only through the motor board.
+  bool want_imu{};
+
   /// True when the motor subdevice came up. A Kinect for Windows, or a Kinect
   /// whose motor interface is claimed by something else, has cameras but no
   /// motor, and publishing controls that can never work is worse than none.
@@ -443,10 +447,31 @@ void depthcam_device::run()
 
     double x{}, y{}, z{};
     freenect_get_mks_accel(state, &x, &y, &z);
-    // freenect reports m/s^2 despite the name; g is the useful unit here.
+    // "mks" is metre-kilogram-second: these are already m/s^2, which is what
+    // the ABI wants. The sensors/accel_* controls publish g instead, because a
+    // number a user reads off a tree is friendlier in gravities.
     accel[0].store(x / 9.80665, std::memory_order_relaxed);
     accel[1].store(y / 9.80665, std::memory_order_relaxed);
     accel[2].store(z / 9.80665, std::memory_order_relaxed);
+
+    if(want_imu && on_frame)
+    {
+      // 2Hz, which is all this is: reading the state is a synchronous control
+      // transfer on the motor board and there is no gyroscope to pair it with.
+      // Enough to know which way up the camera is, not enough to track motion.
+      depthcam_imu_sample sample{};
+      sample.fields = DEPTHCAM_IMU_ACCEL;
+      sample.accel[0] = float(x);
+      sample.accel[1] = float(y);
+      sample.accel[2] = float(z);
+
+      depthcam_frame out{};
+      out.stream = DEPTHCAM_STREAM_IMU;
+      out.format = DEPTHCAM_FMT_IMU;
+      out.data = &sample;
+      out.bytes = sizeof(sample);
+      on_frame(&out, user);
+    }
   }
 }
 
@@ -530,8 +555,9 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
     info.transport = "usb2";
     // No infrared: libfreenect can stream IR, but only instead of colour, not
     // alongside it, and the ABI has no way to express that exclusivity.
+    // IMU only with ?motor=1: the accelerometer is on the motor board.
     info.streams = DEPTHCAM_STREAM_COLOR | DEPTHCAM_STREAM_DEPTH
-                   | DEPTHCAM_STREAM_POINTCLOUD;
+                   | DEPTHCAM_STREAM_POINTCLOUD | DEPTHCAM_STREAM_IMU;
     cb(&info, user);
   }
 
@@ -556,6 +582,7 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
   dev->cfg = *config;
   dev->color_pointcloud = (config->streams & DEPTHCAM_STREAM_POINTCLOUD)
                           && config->color_pointcloud != 0;
+  dev->want_imu = (config->streams & DEPTHCAM_STREAM_IMU) != 0;
 
   // Resolved here rather than left to freenect_open_device_by_camera_serial,
   // because on the models that have no camera serial that call is a coin toss;
@@ -808,6 +835,18 @@ int backend_set_control(depthcam_device* dev, const char* id, double value)
   return 0;
 }
 
+uint32_t backend_active_streams(depthcam_device* dev)
+{
+  if(!dev)
+    return 0;
+  uint32_t streams = dev->cfg.streams;
+  // The accelerometer is on the motor board, which is opt-in and which a 1473
+  // will not give us at all -- see backend_open.
+  if(!dev->has_motor)
+    streams &= ~uint32_t(DEPTHCAM_STREAM_IMU);
+  return streams;
+}
+
 const depthcam_backend_v1 g_backend{
     .abi_version = DEPTHCAM_ABI_VERSION,
     .name = "freenect",
@@ -824,6 +863,7 @@ const depthcam_backend_v1 g_backend{
     .list_controls = &backend_list_controls,
     .get_control = &backend_get_control,
     .set_control = &backend_set_control,
+    .active_streams = &backend_active_streams,
 };
 
 } // namespace

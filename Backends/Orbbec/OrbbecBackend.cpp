@@ -6,6 +6,8 @@
  */
 #include <depthcam_abi.h>
 
+#include <cstdlib>
+
 #include <libobsensor/ObSensor.hpp>
 
 #include <atomic>
@@ -353,6 +355,16 @@ struct depthcam_device
   std::shared_ptr<ob::Device> device;
   std::shared_ptr<ob::Config> config;
   std::unique_ptr<ob::Pipeline> pipeline;
+
+  /// A second pipeline, for the IMU only.
+  ///
+  /// Not the accelerometer and gyroscope added to the video pipeline: a
+  /// frameset is emitted at the slowest enabled stream's rate, so an IMU
+  /// sampling at 200Hz would be delivered at 30 and the point of having it
+  /// would be gone. Orbbec's own IMU example uses a pipeline of its own for
+  /// the same reason.
+  std::unique_ptr<ob::Pipeline> imu_pipeline;
+  std::shared_ptr<ob::Config> imu_config;
   std::shared_ptr<ob::PointCloudFilter> point_cloud;
   std::shared_ptr<ob::Align> align; // only for colour-to-depth
 
@@ -372,6 +384,7 @@ struct depthcam_device
   void deliver_video(uint32_t stream, const std::shared_ptr<ob::Frame>& f);
   void deliver_pointcloud(const std::shared_ptr<ob::FrameSet>& fs);
   void handle(const std::shared_ptr<ob::FrameSet>& fs);
+  void handleImu(const std::shared_ptr<ob::FrameSet>& fs);
 };
 
 namespace
@@ -661,6 +674,73 @@ ControlEntry* depthcam_device::findControl(const char* id)
   return nullptr;
 }
 
+void depthcam_device::handleImu(const std::shared_ptr<ob::FrameSet>& fs)
+{
+  if(!running.load(std::memory_order_acquire) || !fs || !on_frame)
+    return;
+
+  depthcam_imu_sample sample{};
+
+  try
+  {
+    if(auto raw = fs->getFrame(OB_FRAME_ACCEL))
+    {
+      if(auto accel = raw->as<ob::AccelFrame>())
+      {
+        // Metres per second squared since SDK 2.9; the ABI wants SI too, so
+        // there is nothing to convert.
+        const auto v = accel->getValue();
+        sample.accel[0] = v.x;
+        sample.accel[1] = v.y;
+        sample.accel[2] = v.z;
+        sample.fields |= DEPTHCAM_IMU_ACCEL;
+
+        sample.temperature_c = accel->getTemperature();
+        sample.fields |= DEPTHCAM_IMU_TEMPERATURE;
+      }
+    }
+  }
+  catch(...)
+  {
+  }
+
+  try
+  {
+    if(auto raw = fs->getFrame(OB_FRAME_GYRO))
+    {
+      if(auto gyro = raw->as<ob::GyroFrame>())
+      {
+        const auto v = gyro->getValue(); // radians per second
+        sample.gyro[0] = v.x;
+        sample.gyro[1] = v.y;
+        sample.gyro[2] = v.z;
+        sample.fields |= DEPTHCAM_IMU_GYRO;
+
+        if(!(sample.fields & DEPTHCAM_IMU_TEMPERATURE))
+        {
+          sample.temperature_c = gyro->getTemperature();
+          sample.fields |= DEPTHCAM_IMU_TEMPERATURE;
+        }
+      }
+    }
+  }
+  catch(...)
+  {
+  }
+
+  if(sample.fields == 0)
+    return;
+
+  depthcam_frame out{};
+  out.stream = DEPTHCAM_STREAM_IMU;
+  out.format = DEPTHCAM_FMT_IMU;
+  out.timestamp_ns = uint64_t(fs->getTimeStampUs()) * 1000ull;
+  out.data = &sample;
+  out.bytes = sizeof(sample);
+  // No owner: the host copies the sample out before returning.
+  on_frame(&out, user);
+}
+
 void depthcam_device::handle(const std::shared_ptr<ob::FrameSet>& fs)
 {
   if(!running.load(std::memory_order_acquire) || !fs)
@@ -691,10 +771,32 @@ int backend_init(const char* resource_dir)
   {
     // Must precede context construction: the SDK caches the extensions path in
     // a function-local static the first time anything asks for it.
+    //
+    // The *extensions* directory, not the package directory. SDK 2.5 appended
+    // "extensions" itself; 2.9 takes the path literally and looked for
+    // <package>/frameprocessor/libob_frame_processor.so, which does not exist.
+    // The only symptom was a Femto Mega producing no point cloud at all -- the
+    // failure is a warning the SDK logs and swallows.
     if(resource_dir && *resource_dir)
-      ob::Context::setExtensionsDirectory(resource_dir);
+      ob::Context::setExtensionsDirectory(
+          (std::string{resource_dir} + "/extensions").c_str());
 
-    ob::Context::setLoggerToConsole(OB_LOG_SEVERITY_WARN);
+    // Errors only, unless someone is debugging.
+    //
+    // The SDK's logging works again since the fork moved to 2.9.3 (the previous
+    // one had every LOG_ macro defined to nothing), and it is chatty: opening a
+    // Femto Mega alone prints a dozen "recoverable exception" warnings from
+    // component probes that are entirely normal.
+    const bool debug = std::getenv("SCORE_DEPTHCAM_DEBUG") != nullptr;
+    ob::Context::setLoggerToConsole(
+        debug ? OB_LOG_SEVERITY_DEBUG : OB_LOG_SEVERITY_ERROR);
+
+    // And no log file. The SDK otherwise creates Log/OrbbecSDK.log.txt in the
+    // process's working directory -- which for score is wherever the user
+    // happened to launch it from -- and rotates 100MB of it.
+    // "" rather than nullptr: the SDK builds a std::string from the argument
+    // before looking at the severity, so a null directory throws.
+    ob::Context::setLoggerToFile(OB_LOG_SEVERITY_OFF, "");
 
     g_context = std::make_unique<ob::Context>();
 
@@ -781,7 +883,8 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
       info.serial = e.serial.c_str();
       info.transport = e.transport.c_str();
       info.streams = DEPTHCAM_STREAM_COLOR | DEPTHCAM_STREAM_IR
-                     | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD;
+                     | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD
+                     | DEPTHCAM_STREAM_IMU;
 
       cb(&info, user);
     }
@@ -890,17 +993,24 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
         = (config->streams & DEPTHCAM_STREAM_COLOR) || dev->color_pointcloud;
     const bool need_depth = (config->streams & DEPTHCAM_STREAM_DEPTH) || want_cloud;
 
+    // Raw RGB is needed whenever anything is going to *process* the colour
+    // frame rather than just hand it over.
+    //
+    // The camera negotiates MJPG by default and neither ob::Align nor the
+    // point-cloud filter will decode it: the align pass logs "Unsupported
+    // format for C2D conversion yet!" once per frame and produces nothing,
+    // which is a console full of errors and a dead depth stream. Any alignment
+    // is enough to need it -- not just a coloured cloud, which is what this
+    // used to check.
+    const bool need_raw_color
+        = dev->color_pointcloud || config->align != DEPTHCAM_ALIGN_NONE;
+
     if(sensors && need_color)
     {
       int cw = config->color_width, ch = config->color_height;
 
-      if(dev->color_pointcloud)
+      if(need_raw_color)
       {
-        // The point-cloud filter cannot consume a compressed colour frame and
-        // this device negotiates MJPG by default. Depth-to-colour happens to
-        // work because the SDK converts internally on that path; the
-        // colour-to-depth Align pass does not.
-        //
         // Pinning the resolution matters: an explicit format with
         // OB_WIDTH_ANY makes the SDK select the *largest* matching profile,
         // which is 3840x2160 here -- 8.3M points and ~199MB per frame.
@@ -914,8 +1024,9 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
                *dev->config, *sensors, OB_SENSOR_COLOR, cw, ch, config->color_fps,
                OB_FORMAT_RGB))
         {
-          set_error("raw RGB colour unavailable; the coloured point cloud will "
-                    "not work");
+          set_error(
+              "raw RGB colour unavailable; alignment and the coloured point "
+              "cloud will not work on this camera");
           dev->color_pointcloud = false;
           try_enable(
               *dev->config, *sensors, OB_SENSOR_COLOR, config->color_width,
@@ -938,10 +1049,16 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
     {
       // Stereo devices (Gemini 330 family) expose left/right rather than a
       // single IR sensor.
-      if(has_sensor(*sensors, OB_SENSOR_IR))
-        try_enable(*dev->config, *sensors, OB_SENSOR_IR, 0, 0, 0);
-      else
-        try_enable(*dev->config, *sensors, OB_SENSOR_IR_LEFT, 0, 0, 0);
+      const auto sensor = has_sensor(*sensors, OB_SENSOR_IR) ? OB_SENSOR_IR
+                                                             : OB_SENSOR_IR_LEFT;
+      if(!try_enable(
+             *dev->config, *sensors, sensor, config->ir_width, config->ir_height,
+             config->ir_fps))
+      {
+        // A requested profile the camera does not have should not cost the
+        // stream: fall back to whatever it does offer.
+        try_enable(*dev->config, *sensors, sensor, 0, 0, 0);
+      }
     }
 
     if(need_color && config->align == DEPTHCAM_ALIGN_DEPTH_TO_COLOR)
@@ -966,6 +1083,25 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
     // Bound to *this* device: the no-argument ob::Pipeline constructor silently
     // takes the first device the SDK enumerates.
     dev->pipeline = std::make_unique<ob::Pipeline>(dev->device);
+
+    if(config->streams & DEPTHCAM_STREAM_IMU)
+    {
+      // Tolerated rather than required: several Orbbec models have no IMU, and
+      // a camera without one should still stream video.
+      try
+      {
+        dev->imu_pipeline = std::make_unique<ob::Pipeline>(dev->device);
+        dev->imu_config = std::make_shared<ob::Config>();
+        dev->imu_config->enableAccelStream();
+        dev->imu_config->enableGyroStream();
+      }
+      catch(const std::exception& e)
+      {
+        set_error(std::string{"no IMU on this camera: "} + e.what());
+        dev->imu_pipeline.reset();
+        dev->imu_config.reset();
+      }
+    }
 
     if(config->align == DEPTHCAM_ALIGN_COLOR_TO_DEPTH)
       dev->align = std::make_shared<ob::Align>(OB_STREAM_DEPTH);
@@ -1023,6 +1159,23 @@ int backend_start(depthcam_device* dev, depthcam_frame_cb on_frame, void* user)
     dev->pipeline->start(dev->config, [dev](std::shared_ptr<ob::FrameSet> fs) {
       dev->handle(fs);
     });
+
+    if(dev->imu_pipeline)
+    {
+      // Its own try: a camera whose IMU refuses to start still has video, and
+      // that is the more important of the two.
+      try
+      {
+        dev->imu_pipeline->start(
+            dev->imu_config,
+            [dev](std::shared_ptr<ob::FrameSet> fs) { dev->handleImu(fs); });
+      }
+      catch(const std::exception& e)
+      {
+        set_error(std::string{"could not start the IMU: "} + e.what());
+        dev->imu_pipeline.reset();
+      }
+    }
     return 1;
   }
   catch(const std::exception& e)
@@ -1046,6 +1199,17 @@ void backend_stop(depthcam_device* dev)
   // reaches this unconditionally.
   if(!dev->running.exchange(false, std::memory_order_acq_rel))
     return;
+  if(dev->imu_pipeline)
+  {
+    try
+    {
+      dev->imu_pipeline->stop();
+    }
+    catch(...)
+    {
+    }
+  }
+
   try
   {
     dev->pipeline->stop();
@@ -1145,6 +1309,18 @@ int backend_set_control(depthcam_device* dev, const char* id, double value)
   }
 }
 
+uint32_t backend_active_streams(depthcam_device* dev)
+{
+  if(!dev)
+    return 0;
+  uint32_t streams = dev->cfg.streams;
+  // The IMU is the only one that can be asked for and quietly not granted:
+  // several models have none, and the pipeline is only created when one does.
+  if(!dev->imu_pipeline)
+    streams &= ~uint32_t(DEPTHCAM_STREAM_IMU);
+  return streams;
+}
+
 const depthcam_backend_v1 g_backend{
     .abi_version = DEPTHCAM_ABI_VERSION,
     .name = "orbbec",
@@ -1161,6 +1337,7 @@ const depthcam_backend_v1 g_backend{
     .list_controls = &backend_list_controls,
     .get_control = &backend_get_control,
     .set_control = &backend_set_control,
+    .active_streams = &backend_active_streams,
 };
 
 } // namespace

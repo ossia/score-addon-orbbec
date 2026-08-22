@@ -206,6 +206,7 @@ struct depthcam_device
   depthcam_open_config cfg{};
   std::string serial;
   bool color_pointcloud{};
+  bool want_imu{};
   std::atomic_bool running{};
   float depth_scale_mm{1.f};
 
@@ -222,6 +223,7 @@ struct depthcam_device
   ControlEntry* findControl(const char* id);
 
   void handle(const rs2::frameset& fs);
+  void handleMotion(const rs2::motion_frame& f);
   void emitImage(uint32_t stream, const rs2::video_frame& f, float depth_unit);
   void emitPointCloud(const rs2::frameset& fs);
 };
@@ -564,6 +566,48 @@ ControlEntry* depthcam_device::findControl(const char* id)
   return nullptr;
 }
 
+void depthcam_device::handleMotion(const rs2::motion_frame& f)
+{
+  if(!running.load(std::memory_order_acquire) || !on_frame)
+    return;
+
+  const auto stream = f.get_profile().stream_type();
+  const auto v = f.get_motion_data();
+
+  depthcam_imu_sample sample{};
+  if(stream == RS2_STREAM_ACCEL)
+  {
+    // librealsense reports metres per second squared, which the ABI wants too.
+    sample.accel[0] = v.x;
+    sample.accel[1] = v.y;
+    sample.accel[2] = v.z;
+    sample.fields = DEPTHCAM_IMU_ACCEL;
+  }
+  else if(stream == RS2_STREAM_GYRO)
+  {
+    // Radians per second, likewise.
+    sample.gyro[0] = v.x;
+    sample.gyro[1] = v.y;
+    sample.gyro[2] = v.z;
+    sample.fields = DEPTHCAM_IMU_GYRO;
+  }
+  else
+  {
+    return;
+  }
+
+  // One field per sample, deliberately: the D435i's accelerometer and gyroscope
+  // run at different rates (63Hz and 200Hz by default) and pairing them would
+  // mean either holding the fast one back or repeating the slow one.
+  depthcam_frame out{};
+  out.stream = DEPTHCAM_STREAM_IMU;
+  out.format = DEPTHCAM_FMT_IMU;
+  out.timestamp_ns = uint64_t(f.get_timestamp() * 1e6);
+  out.data = &sample;
+  out.bytes = sizeof(sample);
+  on_frame(&out, user);
+}
+
 void depthcam_device::handle(const rs2::frameset& frames)
 {
   if(!running.load(std::memory_order_acquire))
@@ -661,7 +705,8 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
       info.serial = e.serial.c_str();
       info.transport = e.transport.c_str();
       info.streams = DEPTHCAM_STREAM_COLOR | DEPTHCAM_STREAM_IR
-                     | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD;
+                     | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD
+                     | DEPTHCAM_STREAM_IMU;
       cb(&info, user);
     }
     return 1;
@@ -822,7 +867,33 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
           RS2_FORMAT_Z16, config->depth_fps);
 
     if(config->streams & DEPTHCAM_STREAM_IR)
-      dev->config.enable_stream(RS2_STREAM_INFRARED, 1);
+    {
+      // Index 1 is the left imager. 0 for the dimensions means "any", which is
+      // how librealsense reads it too.
+      dev->config.enable_stream(
+          RS2_STREAM_INFRARED, 1, config->ir_width, config->ir_height,
+          RS2_FORMAT_Y8, config->ir_fps);
+    }
+
+    if(config->streams & DEPTHCAM_STREAM_IMU)
+    {
+      // Same pipeline as the video, unlike the Orbbec backend: librealsense
+      // delivers motion frames on their own rather than folding them into a
+      // frameset, so the IMU keeps its own rate without a second pipeline.
+      //
+      // Tolerated rather than required -- a D435 has no IMU where a D435i does,
+      // and the two are told apart only by trying.
+      try
+      {
+        dev->config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
+        dev->config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
+        dev->want_imu = true;
+      }
+      catch(const std::exception& e)
+      {
+        set_error(std::string{"no IMU on this camera: "} + e.what());
+      }
+    }
 
     switch(config->align)
     {
@@ -881,6 +952,8 @@ int backend_start(depthcam_device* dev, depthcam_frame_cb on_frame, void* user)
     {
       if(auto fs = f.as<rs2::frameset>())
         dev->handle(fs);
+      else if(auto mf = f.as<rs2::motion_frame>())
+        dev->handleMotion(mf);
     }
     catch(...)
     {
@@ -954,6 +1027,18 @@ void backend_stop(depthcam_device* dev)
   }
 }
 
+uint32_t backend_active_streams(depthcam_device* dev)
+{
+  if(!dev)
+    return 0;
+  uint32_t streams = dev->cfg.streams;
+  // A D435 has no IMU where a D435i does, and enable_stream is where that
+  // shows up.
+  if(!dev->want_imu)
+    streams &= ~uint32_t(DEPTHCAM_STREAM_IMU);
+  return streams;
+}
+
 const depthcam_backend_v1 g_backend{
     .abi_version = DEPTHCAM_ABI_VERSION,
     .name = "realsense",
@@ -970,6 +1055,7 @@ const depthcam_backend_v1 g_backend{
     .list_controls = &backend_list_controls,
     .get_control = &backend_get_control,
     .set_control = &backend_set_control,
+    .active_streams = &backend_active_streams,
 };
 
 } // namespace

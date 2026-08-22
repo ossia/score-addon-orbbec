@@ -36,3 +36,6 @@ Makefile
 *.user.*
 .cmake
 .vscode
+
+# The OrbbecSDK writes this into the working directory if file logging is on.
+Log/

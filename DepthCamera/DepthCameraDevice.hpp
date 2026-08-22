@@ -64,7 +64,7 @@ private:
   /// on another subnet is never going to be discovered at all. Typing the
   /// address has to be a first-class way in, not a URI the user has to know the
   /// syntax of.
-  QGroupBox* m_network{};
+  QCheckBox* m_network{};
   QLineEdit* m_networkHost{};
   QSpinBox* m_networkPort{};
 
@@ -73,6 +73,7 @@ private:
   QCheckBox* m_depth{};
   QCheckBox* m_pointcloud{};
   QCheckBox* m_colorPointcloud{};
+  QCheckBox* m_imu{};
   QComboBox* m_align{};
 
   QSpinBox* m_colorWidth{};
@@ -81,6 +82,9 @@ private:
   QSpinBox* m_depthWidth{};
   QSpinBox* m_depthHeight{};
   QSpinBox* m_depthFps{};
+  QSpinBox* m_irWidth{};
+  QSpinBox* m_irHeight{};
+  QSpinBox* m_irFps{};
 };
 
 }

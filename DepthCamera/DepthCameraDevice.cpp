@@ -6,6 +6,7 @@
 #include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QSpinBox>
@@ -311,7 +312,7 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
   checkForChanges(m_address);
   layout->addRow(tr("Camera"), m_address);
 
-  // A network camera by address, without having to know the URI syntax.
+  // Address by host and port, without having to know the URI syntax.
   //
   // Discovery is a GVCP broadcast, and the reply comes back addressed to
   // 255.255.255.255 -- the firmware ignores the "unicast acknowledge" flag -- so
@@ -319,36 +320,30 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
   // the segment while the cameras themselves are answering perfectly well. ufw
   // does exactly that by default. A camera on another subnet is out of reach of
   // a broadcast regardless. Either way, typing the address is the way in.
-  m_network = new QGroupBox{tr("Connect over the network"), this};
-  m_network->setCheckable(true);
-  m_network->setChecked(false);
   {
-    auto net_layout = new QFormLayout{m_network};
+    m_network = new QCheckBox{tr("Network"), this};
     m_networkHost = new QLineEdit{this};
     m_networkHost->setPlaceholderText(tr("192.168.0.12"));
-    net_layout->addRow(tr("Host"), m_networkHost);
-
     m_networkPort = new QSpinBox{this};
     m_networkPort->setRange(1, 65535);
     m_networkPort->setValue(8090);
-    net_layout->addRow(tr("Port"), m_networkPort);
+    m_networkPort->setPrefix(tr("port "));
+    m_networkPort->setMaximumWidth(90);
 
-    auto note = new QLabel{
-        tr("Orbbec only (Femto Mega). The camera also has to be reachable: "
-           "automatic discovery needs UDP broadcast to arrive, which a host "
-           "firewall usually blocks."),
-        this};
-    note->setWordWrap(true);
-    net_layout->addRow(note);
+    auto row = new QWidget{this};
+    auto h = new QHBoxLayout{row};
+    h->setContentsMargins(0, 0, 0, 0);
+    h->addWidget(m_network);
+    h->addWidget(m_networkHost, 1);
+    h->addWidget(m_networkPort);
+    layout->addRow(row);
   }
-  // No checkForChanges overload for a QGroupBox; the signal is the same.
   connect(
-      m_network, &QGroupBox::toggled, this, &Device::ProtocolSettingsWidget::changed);
+      m_network, &QCheckBox::toggled, this, &Device::ProtocolSettingsWidget::changed);
   checkForChanges(m_networkHost);
   checkForChanges(m_networkPort);
-  layout->addRow(m_network);
 
-  connect(m_network, &QGroupBox::toggled, this, [this] { updateEnabledState(); });
+  connect(m_network, &QCheckBox::toggled, this, [this] { updateEnabledState(); });
   connect(
       m_networkHost, &QLineEdit::textChanged, this, [this] { updateEnabledState(); });
   connect(
@@ -365,14 +360,34 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
     layout->addRow(warn);
   }
 
-  auto streams = new QGroupBox{tr("Streams"), this};
-  auto streams_layout = new QFormLayout{streams};
-  streams_layout->addRow(m_rgb = new QCheckBox{tr("Color"), this});
-  streams_layout->addRow(m_ir = new QCheckBox{tr("Infrared"), this});
-  streams_layout->addRow(m_depth = new QCheckBox{tr("Depth"), this});
-  streams_layout->addRow(m_pointcloud = new QCheckBox{tr("Point cloud"), this});
-  streams_layout->addRow(
-      m_colorPointcloud = new QCheckBox{tr("Colored point cloud"), this});
+  // Checkboxes on two rows rather than a group box with one per line. There are
+  // six of them and they are all the same kind of thing; stacking them turned a
+  // short dialog into a scrolling one.
+  const auto checkRow = [&](std::initializer_list<QCheckBox**> boxes,
+                            std::initializer_list<const char*> names) {
+    auto row = new QWidget{this};
+    auto h = new QHBoxLayout{row};
+    h->setContentsMargins(0, 0, 0, 0);
+    auto name = names.begin();
+    for(auto* box : boxes)
+    {
+      *box = new QCheckBox{tr(*name++), this};
+      h->addWidget(*box);
+    }
+    h->addStretch(1);
+    return row;
+  };
+
+  layout->addRow(
+      tr("Streams"),
+      checkRow({&m_rgb, &m_ir, &m_depth}, {"Color", "Infrared", "Depth"}));
+
+  // Not every camera has an IMU -- a Kinect v2 does not, a Kinect v1 has only an
+  // accelerometer -- and one that does not simply publishes no nodes for it.
+  layout->addRow(
+      QString{}, checkRow(
+                     {&m_pointcloud, &m_colorPointcloud, &m_imu},
+                     {"Point cloud", "Colored", "Accel / gyro"}));
 
   // Alignment decides the point cloud's resolution, which dominates its cost:
   // on a Femto Mega, depth-to-colour is 2.07M points per frame against 369k the
@@ -386,33 +401,40 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
       tr("Color to depth (depth resolution)"),
       int(DepthCameraSettings::AlignMode::ColorToDepth));
   checkForChanges(m_align);
-  streams_layout->addRow(tr("Alignment"), m_align);
+  layout->addRow(tr("Alignment"), m_align);
 
-  layout->addRow(streams);
-
-  const auto makeSpin = [this] {
+  // One row per stream: width x height @ fps. Nine spin boxes on nine labelled
+  // lines in three group boxes was most of the dialog's height for three
+  // numbers nobody usually changes.
+  const auto makeSpin = [this](int max, const char* suffix) {
     auto sb = new QSpinBox{this};
-    sb->setRange(0, 8192);
+    sb->setRange(0, max);
     sb->setSpecialValueText(tr("Any"));
+    if(suffix)
+      sb->setSuffix(tr(suffix));
+    sb->setMaximumWidth(110);
     checkForChanges(sb);
     return sb;
   };
 
-  auto color = new QGroupBox{tr("Color format"), this};
-  auto color_layout = new QFormLayout{color};
-  color_layout->addRow(tr("Width"), m_colorWidth = makeSpin());
-  color_layout->addRow(tr("Height"), m_colorHeight = makeSpin());
-  color_layout->addRow(tr("FPS"), m_colorFps = makeSpin());
-  layout->addRow(color);
+  const auto formatRow
+      = [&](QSpinBox** w, QSpinBox** h_, QSpinBox** fps) {
+    auto row = new QWidget{this};
+    auto h = new QHBoxLayout{row};
+    h->setContentsMargins(0, 0, 0, 0);
+    h->addWidget(*w = makeSpin(8192, nullptr));
+    h->addWidget(new QLabel{QStringLiteral("×"), this});
+    h->addWidget(*h_ = makeSpin(8192, nullptr));
+    h->addWidget(*fps = makeSpin(1000, " fps"));
+    h->addStretch(1);
+    return row;
+  };
 
-  auto depth = new QGroupBox{tr("Depth format"), this};
-  auto depth_layout = new QFormLayout{depth};
-  depth_layout->addRow(tr("Width"), m_depthWidth = makeSpin());
-  depth_layout->addRow(tr("Height"), m_depthHeight = makeSpin());
-  depth_layout->addRow(tr("FPS"), m_depthFps = makeSpin());
-  layout->addRow(depth);
+  layout->addRow(tr("Color"), formatRow(&m_colorWidth, &m_colorHeight, &m_colorFps));
+  layout->addRow(tr("Infrared"), formatRow(&m_irWidth, &m_irHeight, &m_irFps));
+  layout->addRow(tr("Depth"), formatRow(&m_depthWidth, &m_depthHeight, &m_depthFps));
 
-  for(auto* cb : {m_rgb, m_ir, m_depth, m_pointcloud, m_colorPointcloud})
+  for(auto* cb : {m_rgb, m_ir, m_depth, m_pointcloud, m_colorPointcloud, m_imu})
   {
     checkForChanges(cb);
     connect(cb, &QCheckBox::toggled, this, [this] { updateEnabledState(); });
@@ -479,6 +501,7 @@ Device::DeviceSettings InputSettingsWidget::getSettings() const
   set.depth = m_depth->isChecked();
   set.pointcloud = m_pointcloud->isChecked();
   set.colorPointcloud = m_colorPointcloud->isChecked();
+  set.imu = m_imu->isChecked();
   set.align
       = static_cast<DepthCameraSettings::AlignMode>(m_align->currentData().toInt());
   set.colorWidth = m_colorWidth->value();
@@ -487,6 +510,9 @@ Device::DeviceSettings InputSettingsWidget::getSettings() const
   set.depthWidth = m_depthWidth->value();
   set.depthHeight = m_depthHeight->value();
   set.depthFps = m_depthFps->value();
+  set.irWidth = m_irWidth->value();
+  set.irHeight = m_irHeight->value();
+  set.irFps = m_irFps->value();
 
   s.deviceSpecificSettings = QVariant::fromValue(set);
   return s;
@@ -541,6 +567,7 @@ void InputSettingsWidget::setSettings(const Device::DeviceSettings& settings)
   m_depth->setChecked(set.depth);
   m_pointcloud->setChecked(set.pointcloud);
   m_colorPointcloud->setChecked(set.colorPointcloud);
+  m_imu->setChecked(set.imu);
   if(const int idx = m_align->findData(int(set.align)); idx >= 0)
     m_align->setCurrentIndex(idx);
   m_colorWidth->setValue(set.colorWidth);
@@ -549,6 +576,9 @@ void InputSettingsWidget::setSettings(const Device::DeviceSettings& settings)
   m_depthWidth->setValue(set.depthWidth);
   m_depthHeight->setValue(set.depthHeight);
   m_depthFps->setValue(set.depthFps);
+  m_irWidth->setValue(set.irWidth);
+  m_irHeight->setValue(set.irHeight);
+  m_irFps->setValue(set.irFps);
 
   updateEnabledState();
 }

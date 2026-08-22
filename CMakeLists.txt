@@ -190,6 +190,8 @@ add_library(score_addon_orbbec
   DepthCamera/DepthCameraProtocol.cpp
   DepthCamera/DepthCameraControls.hpp
   DepthCamera/DepthCameraControls.cpp
+  DepthCamera/DepthCameraImu.hpp
+  DepthCamera/DepthCameraImu.cpp
 
   score_addon_orbbec.hpp
   score_addon_orbbec.cpp

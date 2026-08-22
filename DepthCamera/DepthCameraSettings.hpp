@@ -35,6 +35,17 @@ struct DepthCameraSettings
   bool colorPointcloud{false};
 
   /**
+   * @brief Accelerometer and gyroscope, published as `imu/accel` and `imu/gyro`.
+   *
+   * Off by default, and not because it is expensive -- it is a few hundred
+   * samples a second and no image data at all. It is off because asking for it
+   * changes what the camera streams: an Orbbec has to have the IMU sensors
+   * enabled in the pipeline configuration, and an Azure Kinect runs a second
+   * capture loop for it. A device that did not ask should not pay.
+   */
+  bool imu{false};
+
+  /**
    * @brief How depth and colour are brought into a common frame of reference.
    *
    * This also decides the point cloud's resolution, which dominates its cost.
@@ -55,6 +66,7 @@ struct DepthCameraSettings
   /// 0 means "let the backend choose".
   int colorWidth{0}, colorHeight{0}, colorFps{0};
   int depthWidth{0}, depthHeight{0}, depthFps{0};
+  int irWidth{0}, irHeight{0}, irFps{0};
 
   /// The backend a device URI names, e.g. "orbbec". Empty if none.
   QString backend() const;

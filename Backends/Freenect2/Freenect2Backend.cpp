@@ -844,6 +844,12 @@ int backend_set_control(depthcam_device* dev, const char* id, double value)
   return 1;
 }
 
+uint32_t backend_active_streams(depthcam_device* dev)
+{
+  // The Kinect v2 has no inertial sensor of any kind.
+  return dev ? (dev->cfg.streams & ~uint32_t(DEPTHCAM_STREAM_IMU)) : 0;
+}
+
 const depthcam_backend_v1 g_backend{
     .abi_version = DEPTHCAM_ABI_VERSION,
     .name = "freenect2",
@@ -860,6 +866,7 @@ const depthcam_backend_v1 g_backend{
     .list_controls = &backend_list_controls,
     .get_control = &backend_get_control,
     .set_control = &backend_set_control,
+    .active_streams = &backend_active_streams,
 };
 
 } // namespace

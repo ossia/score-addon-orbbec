@@ -1,5 +1,7 @@
 #include "DepthCameraStream.hpp"
 
+#include <cstring>
+
 #include <DepthCamera/DepthCameraSettings.hpp>
 
 #include <Video/GStreamerCompatibility.hpp>
@@ -118,10 +120,15 @@ InputStream::InputStream(
     cfg.streams |= DEPTHCAM_STREAM_DEPTH;
   if(settings.pointcloud)
     cfg.streams |= DEPTHCAM_STREAM_POINTCLOUD;
+  if(settings.imu)
+    cfg.streams |= DEPTHCAM_STREAM_IMU;
 
   cfg.color_width = settings.colorWidth;
   cfg.color_height = settings.colorHeight;
   cfg.color_fps = settings.colorFps;
+  cfg.ir_width = settings.irWidth;
+  cfg.ir_height = settings.irHeight;
+  cfg.ir_fps = settings.irFps;
   cfg.depth_width = settings.depthWidth;
   cfg.depth_height = settings.depthHeight;
   cfg.depth_fps = settings.depthFps;
@@ -154,6 +161,15 @@ InputStream::~InputStream() noexcept
 {
   close();
   releaseCodecs();
+}
+
+uint32_t InputStream::activeStreams() const noexcept
+{
+  if(!m_device || !m_backend)
+    return 0;
+  if(!m_backend->active_streams)
+    return ~0u; // a backend that does not say is taken at its word
+  return m_backend->active_streams(m_device);
 }
 
 void InputStream::close() noexcept
@@ -234,12 +250,41 @@ void InputStream::onFrame(const depthcam_frame& f)
     case DEPTHCAM_STREAM_POINTCLOUD:
       handlePointCloud(f);
       break;
+    case DEPTHCAM_STREAM_IMU:
+      handleImu(f);
+      break;
     default:
       // Unknown stream: still hand the buffer back.
       if(f.release)
         f.release(f.owner);
       break;
   }
+}
+
+void InputStream::setImuCallback(imu_callback cb) noexcept
+{
+  std::lock_guard lock{m_imu_mutex};
+  m_imu_cb = std::move(cb);
+}
+
+void InputStream::handleImu(const depthcam_frame& f)
+{
+  // Not queued like the image streams: an inertial sample is 32 bytes and is
+  // only interesting while it is current. Queuing would add latency to the one
+  // stream here where latency is the whole point, and a listener that fell
+  // behind would then be fed history.
+  if(f.format == DEPTHCAM_FMT_IMU && f.bytes >= sizeof(depthcam_imu_sample))
+  {
+    depthcam_imu_sample sample{};
+    std::memcpy(&sample, f.data, sizeof(sample));
+
+    std::lock_guard lock{m_imu_mutex};
+    if(m_imu_cb)
+      m_imu_cb(sample);
+  }
+
+  if(f.release)
+    f.release(f.owner);
 }
 
 void InputStream::handleImage(StreamOutput& out, const depthcam_frame& f)

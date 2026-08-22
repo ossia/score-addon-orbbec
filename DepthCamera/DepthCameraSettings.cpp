@@ -21,7 +21,8 @@ void DataStreamReader::read(const Gfx::DepthCamera::DepthCameraSettings& n)
   m_stream << n.device << n.rgb << n.ir << n.depth << n.pointcloud
            << n.colorPointcloud << static_cast<int32_t>(n.align) << n.colorWidth
            << n.colorHeight << n.colorFps << n.depthWidth << n.depthHeight
-           << n.depthFps;
+           << n.depthFps << n.imu << n.irWidth << n.irHeight
+           << n.irFps;
   insertDelimiter();
 }
 
@@ -31,7 +32,8 @@ void DataStreamWriter::write(Gfx::DepthCamera::DepthCameraSettings& n)
   int32_t align{};
   m_stream >> n.device >> n.rgb >> n.ir >> n.depth >> n.pointcloud
       >> n.colorPointcloud >> align >> n.colorWidth >> n.colorHeight >> n.colorFps
-      >> n.depthWidth >> n.depthHeight >> n.depthFps;
+      >> n.depthWidth >> n.depthHeight >> n.depthFps >> n.imu >> n.irWidth >> n.irHeight
+      >> n.irFps;
   n.align = static_cast<Gfx::DepthCamera::DepthCameraSettings::AlignMode>(align);
   checkDelimiter();
 }
@@ -52,6 +54,10 @@ void JSONReader::read(const Gfx::DepthCamera::DepthCameraSettings& n)
   obj["DepthWidth"] = n.depthWidth;
   obj["DepthHeight"] = n.depthHeight;
   obj["DepthFps"] = n.depthFps;
+  obj["Imu"] = n.imu;
+  obj["IRWidth"] = n.irWidth;
+  obj["IRHeight"] = n.irHeight;
+  obj["IRFps"] = n.irFps;
 }
 
 template <>
@@ -89,4 +95,12 @@ void JSONWriter::write(Gfx::DepthCamera::DepthCameraSettings& n)
     n.depthHeight = v->toInt();
   if(auto v = obj.tryGet("DepthFps"))
     n.depthFps = v->toInt();
+  if(auto v = obj.tryGet("Imu"))
+    n.imu = v->toBool();
+  if(auto v = obj.tryGet("IRWidth"))
+    n.irWidth = v->toInt();
+  if(auto v = obj.tryGet("IRHeight"))
+    n.irHeight = v->toInt();
+  if(auto v = obj.tryGet("IRFps"))
+    n.irFps = v->toInt();
 }

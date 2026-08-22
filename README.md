@@ -158,6 +158,9 @@ The device exposes one child node per enabled stream:
 | `ir` | texture | not offered by Kinect v1, which can stream IR only *instead of* colour |
 | `depth` | texture | 16-bit; the shader rescales using the unit the camera reports |
 | `pointcloud` | geometry | connect to *Model Display* or any geometry input |
+| `imu/accel` | vec3f | acceleration in m/s², including gravity; off by default |
+| `imu/gyro` | vec3f | angular velocity in rad/s |
+| `imu/temperature` | float | degrees Celsius, where the camera reports it |
 
 Point-cloud positions are in **metres**, right-handed, +X right / +Y down /
 +Z forward. Colours, where present, are normalised to 0–1.
@@ -229,6 +232,38 @@ If a named camera is not present the device fails to connect rather than falling
 back to a different one: silently streaming from the wrong camera is worse than
 not connecting.
 
+### Accelerometer and gyroscope
+
+Tick **Accelerometer / gyroscope** to publish the camera's inertial sensors at
+the device root. Units are SI — metres per second squared and radians per second
+— for the same reason point clouds are in metres: a patch should not have to
+know which camera it is reading.
+
+| Camera | Rate | Temperature |
+|---|---|---|
+| Azure Kinect DK | 1.6 kHz, both | yes |
+| Intel RealSense D435i | 200 Hz gyro, 63 Hz accel | no |
+| Orbbec Femto Mega | as configured, 50 Hz by default | yes |
+| Kinect v1 | 2 Hz, accelerometer only, needs `?motor=1` | no |
+| Kinect v2 | — no inertial sensor | — |
+
+A camera that has none publishes no nodes at all rather than three that never
+move, so the tree tells you what the hardware can actually do.
+
+Accelerometer and gyroscope are sampled independently and rarely at the same
+rate, so each arrives on its own: on a D435i the gyro node updates three times
+per accelerometer update. Nothing is paired up or held back.
+
+Off by default, and not because it is expensive — it is a few hundred samples a
+second and no image data. It is off because asking changes what the camera
+streams: an Orbbec runs a second pipeline for it, an Azure Kinect a second
+capture loop.
+
+Where the camera lets you choose a rate, it is a setting like any other:
+`controls/imu/accel_odr` and `controls/imu/gyro_odr` on an Orbbec, with
+`*_full_scale` for the ranges. Those are the IMU's *configuration*, at
+`controls/imu/`; the readings are at `imu/`. Same word, opposite direction.
+
 ### Camera settings
 
 Whatever the camera's SDK will let you change appears under a `controls` node,
@@ -259,6 +294,7 @@ ask the device what it supports. Roughly what to expect:
 | Azure Kinect DK | 12 — the colour controls, plus sensor temperature |
 | Kinect v2 | 5 — the three exposure modes and their parameters |
 | Kinect v1 | 6 — tilt, LED, accelerometer (see below) |
+
 
 Two groups are worth calling out:
 

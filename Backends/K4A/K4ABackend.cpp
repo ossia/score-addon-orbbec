@@ -59,6 +59,9 @@ struct K4AApi
   k4a_result_t (*device_start_cameras)(k4a_device_t, const k4a_device_configuration_t*);
   void (*device_stop_cameras)(k4a_device_t);
   k4a_wait_result_t (*device_get_capture)(k4a_device_t, k4a_capture_t*, int32_t);
+  k4a_result_t (*device_start_imu)(k4a_device_t);
+  void (*device_stop_imu)(k4a_device_t);
+  k4a_wait_result_t (*device_get_imu_sample)(k4a_device_t, k4a_imu_sample_t*, int32_t);
   k4a_result_t (*device_get_calibration)(
       k4a_device_t, k4a_depth_mode_t, k4a_color_resolution_t, k4a_calibration_t*);
 
@@ -176,6 +179,9 @@ bool load_k4a(K4AApi& api, const char* resource_dir)
   sym(api.device_start_cameras, "k4a_device_start_cameras");
   sym(api.device_stop_cameras, "k4a_device_stop_cameras");
   sym(api.device_get_capture, "k4a_device_get_capture");
+  sym(api.device_start_imu, "k4a_device_start_imu");
+  sym(api.device_stop_imu, "k4a_device_stop_imu");
+  sym(api.device_get_imu_sample, "k4a_device_get_imu_sample");
   sym(api.device_get_calibration, "k4a_device_get_calibration");
   sym(api.device_get_color_control_capabilities,
       "k4a_device_get_color_control_capabilities");
@@ -367,6 +373,15 @@ struct depthcam_device
 
   std::atomic_bool running{};
   std::thread thread;
+
+  /// A thread of its own, because libk4a is a pull API twice over: the capture
+  /// loop is blocked in k4a_device_get_capture and cannot also be waiting on
+  /// k4a_device_get_imu_sample. The IMU runs at 1.6kHz against the cameras' 30,
+  /// so interleaving them on one thread would not have worked either.
+  bool want_imu{};
+  std::atomic_bool imu_running{};
+  std::thread imu_thread;
+  void runImu();
 
   depthcam_frame_cb on_frame{};
   void* user{};
@@ -607,6 +622,51 @@ void depthcam_device::handleCapture(k4a_capture_t capture)
       g_k4a.image_release(img);
 }
 
+void depthcam_device::runImu()
+{
+  while(imu_running.load(std::memory_order_acquire))
+  {
+    k4a_imu_sample_t s{};
+    const auto r = g_k4a.device_get_imu_sample(dev, &s, 1000);
+    if(r == K4A_WAIT_RESULT_TIMEOUT)
+      continue;
+    if(r != K4A_WAIT_RESULT_SUCCEEDED)
+      break;
+
+    if(!on_frame)
+      continue;
+
+    depthcam_imu_sample out_sample{};
+    // Metres per second squared and radians per second, which is what the ABI
+    // asks for; nothing to convert.
+    out_sample.accel[0] = s.acc_sample.xyz.x;
+    out_sample.accel[1] = s.acc_sample.xyz.y;
+    out_sample.accel[2] = s.acc_sample.xyz.z;
+    out_sample.gyro[0] = s.gyro_sample.xyz.x;
+    out_sample.gyro[1] = s.gyro_sample.xyz.y;
+    out_sample.gyro[2] = s.gyro_sample.xyz.z;
+    out_sample.temperature_c = s.temperature;
+    out_sample.fields
+        = DEPTHCAM_IMU_ACCEL | DEPTHCAM_IMU_GYRO | DEPTHCAM_IMU_TEMPERATURE;
+
+    depthcam_frame out{};
+    out.stream = DEPTHCAM_STREAM_IMU;
+    out.format = DEPTHCAM_FMT_IMU;
+    out.timestamp_ns = uint64_t(s.acc_timestamp_usec) * 1000ull;
+    out.data = &out_sample;
+    out.bytes = sizeof(out_sample);
+
+    try
+    {
+      on_frame(&out, user);
+    }
+    catch(...)
+    {
+      // Never let anything escape into libk4a's caller.
+    }
+  }
+}
+
 void depthcam_device::run()
 {
   while(running.load(std::memory_order_acquire))
@@ -843,7 +903,8 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
     info.serial = e.serial.c_str();
     info.transport = "usb3";
     info.streams = DEPTHCAM_STREAM_COLOR | DEPTHCAM_STREAM_IR
-                   | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD;
+                   | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD
+                   | DEPTHCAM_STREAM_IMU;
     cb(&info, user);
   }
   return 1;
@@ -960,6 +1021,8 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
     return nullptr;
   }
 
+  dev->want_imu = (config->streams & DEPTHCAM_STREAM_IMU) != 0;
+
   const bool want_cloud = (config->streams & DEPTHCAM_STREAM_POINTCLOUD) != 0;
   dev->color_pointcloud = want_cloud && config->color_pointcloud != 0
                           && config->align != DEPTHCAM_ALIGN_NONE;
@@ -1044,6 +1107,20 @@ int backend_start(depthcam_device* dev, depthcam_frame_cb on_frame, void* user)
   dev->running.store(true, std::memory_order_release);
   // k4a is a pull API, so unlike the other backends this one owns a thread.
   dev->thread = std::thread{[dev] { dev->run(); }};
+
+  if(dev->want_imu && g_k4a.device_start_imu)
+  {
+    // A camera whose IMU refuses to start still has video, which matters more.
+    if(g_k4a.device_start_imu(dev->dev) == K4A_RESULT_SUCCEEDED)
+    {
+      dev->imu_running.store(true, std::memory_order_release);
+      dev->imu_thread = std::thread{[dev] { dev->runImu(); }};
+    }
+    else
+    {
+      set_error("could not start the Azure Kinect IMU");
+    }
+  }
   return 1;
 }
 
@@ -1051,10 +1128,34 @@ void backend_stop(depthcam_device* dev)
 {
   if(!dev)
     return;
+
+  if(dev->imu_running.exchange(false, std::memory_order_acq_rel))
+  {
+    // stop_imu first: it unblocks a thread sitting in get_imu_sample, which is
+    // documented to be safe from another thread and is the only way not to wait
+    // out the timeout.
+    if(g_k4a.device_stop_imu)
+      g_k4a.device_stop_imu(dev->dev);
+    if(dev->imu_thread.joinable())
+      dev->imu_thread.join();
+  }
+
   if(!dev->running.exchange(false, std::memory_order_acq_rel))
     return;
   if(dev->thread.joinable())
     dev->thread.join();
+}
+
+uint32_t backend_active_streams(depthcam_device* dev)
+{
+  if(!dev)
+    return 0;
+  uint32_t streams = dev->cfg.streams;
+  // Every Azure Kinect has an IMU; what it may not have is a libk4a new enough
+  // to expose it.
+  if(!dev->want_imu || !g_k4a.device_start_imu)
+    streams &= ~uint32_t(DEPTHCAM_STREAM_IMU);
+  return streams;
 }
 
 const depthcam_backend_v1 g_backend{
@@ -1073,6 +1174,7 @@ const depthcam_backend_v1 g_backend{
     .list_controls = &backend_list_controls,
     .get_control = &backend_get_control,
     .set_control = &backend_set_control,
+    .active_streams = &backend_active_streams,
 };
 
 } // namespace

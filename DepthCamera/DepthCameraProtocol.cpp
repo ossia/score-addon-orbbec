@@ -499,6 +499,11 @@ depthcam_device_impl::depthcam_device_impl(
         dec, depthcam_node::Kind::PointCloud, ctx, *this, "pointcloud"));
   }
 
+  // Only if the camera really has one: a Kinect v2 does not, and three nodes
+  // that never move are worse than none.
+  if(settings.imu && (stream->activeStreams() & DEPTHCAM_STREAM_IMU))
+    m_imu = std::make_unique<ImuTree>(stream, *this, *this);
+
   // Last, so the streams stay at the top of the explorer: a camera can publish
   // fifty settings and the four things a user is looking for should not be at
   // the bottom of that list.
@@ -519,6 +524,10 @@ void depthcam_device_impl::releaseControls() noexcept
   // The protocol must stop routing writes here before the tree goes.
   static_cast<depthcam_protocol&>(*m_protocol).setControls(nullptr);
   m_controls.reset();
+
+  // And the camera must stop pushing samples at parameters that are about to
+  // be freed. ~ImuTree does not return until any callback in flight has.
+  m_imu.reset();
 }
 
 depthcam_device_impl::~depthcam_device_impl()

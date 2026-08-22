@@ -15,6 +15,7 @@
 #include <ossia/network/generic/generic_node.hpp>
 
 #include <DepthCamera/DepthCameraControls.hpp>
+#include <DepthCamera/DepthCameraImu.hpp>
 #include <DepthCamera/DepthCameraStream.hpp>
 #include <DepthCamera/DepthCameraSettings.hpp>
 
@@ -144,17 +145,17 @@ public:
       std::unique_ptr<depthcam_protocol> proto, std::string name);
   ~depthcam_device_impl();
 
-  /// Drops the settings tree.
+  /// Drops the settings and IMU trees.
   ///
-  /// Has to happen before anything clears the node tree, because the settings
-  /// tree points at the parameters those nodes own --
-  /// Device::DeviceInterface::disconnect() calls root.clear_children(), so the
-  /// device object outlives its own parameters by a good margin on a reconnect
-  /// or a device removal.
+  /// Has to happen before anything clears the node tree, because both point at
+  /// parameters those nodes own -- Device::DeviceInterface::disconnect() calls
+  /// root.clear_children(), so the device object outlives its own parameters by
+  /// a good margin on a reconnect or a device removal.
   void releaseControls() noexcept;
 
 private:
   std::unique_ptr<ControlTree> m_controls;
+  std::unique_ptr<ImuTree> m_imu;
 };
 
 }

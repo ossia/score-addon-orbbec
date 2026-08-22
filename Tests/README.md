@@ -32,6 +32,8 @@ g++ -std=c++20 -O1 -o /tmp/nettest Tests/abi/nettest.cpp \
 | `ctltest` | Lists every control with its kind, access, range and current value. |
 | `ctlwrite` | Writes every writable control and reads it back. Distinguishes "took", "refused" and "silently ignored". |
 | `k4aenum` | Whether enumerating interferes with an open device, and vice versa. |
+| `imutest` | Inertial samples: rate, which fields arrive, and whether a camera at rest really measures one gravity. |
+| `streamsq` | What `open()` actually granted, against what was asked for. |
 
 ## score/
 
@@ -51,10 +53,28 @@ camera the enumerators report, so plugging in more hardware widens the test.
 | `controls_e2e` | The `controls` subtree: how many, grouped how, per backend. |
 | `reconnect_e2e` | That a camera is released the instant its device is removed, and that a second device on the same camera cannot take the first one's streams away. |
 | `latency_e2e` | That nothing blocks the caller: walking the tree, listening to every node, and re-walking while polling all have to stay under 100ms whatever the camera is. |
+| `imu_e2e` | The inertial toggle: nodes on a camera that has an IMU, nothing on one that does not, nothing at all when the toggle is off, and no stall from listening to a 1.6kHz signal. |
 
 `latency_e2e` is the regression test for a specific mistake — polling the camera
 from the GUI thread — and it is the one to run after touching
 `DepthCameraControls`.
+
+### Two traps in the scripting API
+
+Both cost real time here, so they are worth stating.
+
+**The settings an enumerator hands to JS are an opaque QVariant.** Passing
+`cams[i].settings` straight to `Score.createDevice` works. Copying its
+properties into a plain object -- `for (var k in d.settings) s[k] = d.settings[k]`
+-- silently yields `{}`, which means an empty address, which every backend reads
+as *the first camera it can see*. A test written that way opens the same camera
+eight times while printing a different name each time and passing throughout.
+`imu_e2e` addresses cameras by bare backend prefix (`"orbbec:"`, `"k4a:"`) for
+exactly this reason.
+
+**A device's inertial readings and its inertial settings are both spelled
+`imu`.** `cam:/imu/accel` is a reading; `cam:/controls/imu/gyro_odr` is a
+setting. Matching on `"/imu/"` finds both.
 
 ### A caveat worth knowing
 

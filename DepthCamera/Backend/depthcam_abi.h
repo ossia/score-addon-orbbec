@@ -36,7 +36,15 @@
 extern "C" {
 #endif
 
-#define DEPTHCAM_ABI_VERSION 2
+/**
+ * 1: streams, frames, alignment.
+ * 2: controls (list_controls / get_control / set_control).
+ * 3: DEPTHCAM_STREAM_IMU and depthcam_imu_sample.
+ *
+ * The host refuses a backend whose version does not match, so host and backends
+ * are always built together.
+ */
+#define DEPTHCAM_ABI_VERSION 3
 
 #if defined(_WIN32)
 #define DEPTHCAM_EXPORT __declspec(dllexport)
@@ -51,6 +59,8 @@ enum depthcam_stream
   DEPTHCAM_STREAM_IR = 1u << 1,
   DEPTHCAM_STREAM_DEPTH = 1u << 2,
   DEPTHCAM_STREAM_POINTCLOUD = 1u << 3,
+  /** Accelerometer and gyroscope samples; see depthcam_imu_sample. */
+  DEPTHCAM_STREAM_IMU = 1u << 4,
 };
 
 /**
@@ -99,7 +109,41 @@ enum depthcam_format
    * metres. A backend converts; the host never guesses. */
   DEPTHCAM_FMT_XYZ,    /* 3 floats per point */
   DEPTHCAM_FMT_XYZRGB, /* 6 floats per point, colour normalised to 0..1 */
+
+  /* One depthcam_imu_sample. */
+  DEPTHCAM_FMT_IMU,
 };
+
+/** Which fields of a depthcam_imu_sample carry a reading. */
+enum depthcam_imu_field
+{
+  DEPTHCAM_IMU_ACCEL = 1u << 0,
+  DEPTHCAM_IMU_GYRO = 1u << 1,
+  DEPTHCAM_IMU_TEMPERATURE = 1u << 2,
+};
+
+/**
+ * One inertial reading, the payload of a DEPTHCAM_STREAM_IMU frame.
+ *
+ * Units are SI, for the same reason point clouds are in metres: the host must
+ * not have to know which camera it is talking to. m/s^2 and rad/s is also what
+ * the OrbbecSDK (since 2.9), librealsense and libk4a all report natively, so
+ * only libfreenect converts.
+ *
+ * Accelerometer and gyroscope are sampled independently by every one of these
+ * cameras, and rarely at the same rate. A backend delivers whichever it just
+ * received and says so in `fields`; it does not wait to pair them up, because
+ * pairing costs latency on the faster of the two and the host has nothing to do
+ * with a stale sample. `fields` is never zero.
+ */
+typedef struct depthcam_imu_sample
+{
+  uint32_t fields; /* bitmask of depthcam_imu_field */
+
+  float accel[3];      /* metres per second squared */
+  float gyro[3];       /* radians per second */
+  float temperature_c; /* degrees Celsius */
+} depthcam_imu_sample;
 
 /** How depth and colour are brought into a common frame of reference. */
 enum depthcam_align
@@ -158,6 +202,14 @@ typedef struct depthcam_open_config
 
   int32_t color_width, color_height, color_fps;
   int32_t depth_width, depth_height, depth_fps;
+
+  /**
+   * Infrared, which is not always the depth sensor's own resolution: an Orbbec
+   * enumerates IR profiles separately, and a RealSense can stream 1280x720
+   * infrared next to 848x480 depth. Zero means "backend decides", and a backend
+   * whose IR is inseparable from depth is free to ignore this.
+   */
+  int32_t ir_width, ir_height, ir_fps;
 
   int32_t align;            /* depthcam_align */
   int32_t color_pointcloud; /* non-zero to tint the cloud from the colour sensor */
@@ -279,6 +331,20 @@ typedef struct depthcam_backend_v1
   int (*get_control)(depthcam_device*, const char* id, double* out);
 
   int (*set_control)(depthcam_device*, const char* id, double value);
+
+  /* --- ABI 3 ------------------------------------------------------------ */
+
+  /**
+   * Which streams the camera actually gave us, as a bitmask of depthcam_stream.
+   *
+   * open() takes a wish, not an order: a Kinect v2 has no IMU, a D435 has one
+   * where a D435i does not, and several Orbbec models have neither. Without
+   * this the host would publish an imu/accel node on a camera that will never
+   * fill it in, which is worse than not offering it.
+   *
+   * May be NULL, in which case the host assumes it got what it asked for.
+   */
+  uint32_t (*active_streams)(depthcam_device*);
 } depthcam_backend_v1;
 
 /**
