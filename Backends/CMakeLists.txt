@@ -319,7 +319,18 @@ if(SCORE_DEPTHCAM_BUILD_REALSENSE
   # full functionality, and the udev rules we ship grant raw USB access anyway.
   set(FORCE_RSUSB_BACKEND ON CACHE INTERNAL "")
 
-  add_subdirectory("${SCORE_DEPTHCAM_SDK_DIR}/librealsense" librealsense EXCLUDE_FROM_ALL)
+  # librealsense's install_config.cmake runs configure_package_config_file,
+  # which rejects a relative CMAKE_INSTALL_PREFIX outright ("INSTALL_PREFIX
+  # must be an absolute path"). CMake accepts a relative one, and score's
+  # sanitizer build tree uses "install", so a perfectly ordinary configuration
+  # otherwise fails here. Nothing in this tree is ever installed; the value only
+  # has to be well-formed.
+  block()
+    if(NOT IS_ABSOLUTE "${CMAKE_INSTALL_PREFIX}")
+      set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_PREFIX}")
+    endif()
+    add_subdirectory("${SCORE_DEPTHCAM_SDK_DIR}/librealsense" librealsense EXCLUDE_FROM_ALL)
+  endblock()
 
   # librealsense bundles an old copy of rosbag2 whose headers use uint8_t/
   # uint64_t without including <cstdint>. That compiled while libstdc++ still

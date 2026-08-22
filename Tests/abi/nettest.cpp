@@ -4,6 +4,7 @@
 #include <dlfcn.h>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -56,6 +57,18 @@ int main(int argc, char** argv)
   printf("\n-- open %s --\n", uri);
   depthcam_open_config cfg{};
   cfg.streams = DEPTHCAM_STREAM_COLOR | DEPTHCAM_STREAM_DEPTH | DEPTHCAM_STREAM_POINTCLOUD;
+  cfg.align = DEPTHCAM_ALIGN_COLOR_TO_DEPTH;  // the default in score
+
+  // DEPTHCAM_TEST_STREAMS overrides the mask, and clearing the alignment with
+  // it. Needed to reach an Azure Kinect under a sanitizer: anything involving
+  // depth pulls in libdepthengine, a closed Microsoft blob that refuses to
+  // initialise in an instrumented process, so colour-only is the only way to
+  // exercise that backend at all there.
+  if(const char* e = std::getenv("DEPTHCAM_TEST_STREAMS"))
+  {
+    cfg.streams = uint32_t(std::strtoul(e, nullptr, 0));
+    cfg.align = DEPTHCAM_ALIGN_NONE;
+  }
   const auto t0 = std::chrono::steady_clock::now();
   auto* dev = b->open(uri, &cfg);
   const auto dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

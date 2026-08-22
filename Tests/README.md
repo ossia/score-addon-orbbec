@@ -59,6 +59,37 @@ camera the enumerators report, so plugging in more hardware widens the test.
 from the GUI thread — and it is the one to run after touching
 `DepthCameraControls`.
 
+## Sanitizers
+
+`build-asan-ubsan` (clang, `-fsanitize=address,undefined,integer`) builds the
+plug-in and all five backends. The harnesses have to be built with the same
+flags — ASan's runtime must come first in the initial library list, and a plain
+executable that `dlopen`s an instrumented backend aborts with *"ASan runtime
+does not come first"*. `Tests/abi/asan_run.sh` does both and reports per test.
+
+Two things about the results are worth knowing in advance.
+
+**An Azure Kinect cannot be tested under ASan beyond its colour stream.**
+Anything involving depth initialises `libdepthengine`, Microsoft's closed
+transform engine, which fails with `error code: 108` in an instrumented
+process. `DEPTHCAM_TEST_STREAMS=1` on `nettest` asks for colour only, which is
+the one configuration that runs.
+
+**Most of what a sanitizer reports here belongs to the vendored SDKs.** Filter
+by path before reading anything into it: `librealsense`, `libjpeg`, `libusb`,
+`libfreenect`, `libfreenect2`, and libstdc++ itself under `-fsanitize=integer`
+(which flags the `0 - 1` in every `std::string` and `std::vector` internal,
+where unsigned wraparound is defined and intended). A run that reports nothing
+in `DepthCamera/` or `Backends/*/` is the outcome to want.
+
+### Check the tests actually ran
+
+A backend with no camera, or no SDK, reports nothing — and a sanitizer run that
+did nothing looks exactly like a clean one. Every log has to be checked for
+evidence of work before it counts: `frames:` for a stream test, a control count,
+`open #4` for a reopen test. The first pass here scored the Azure Kinect clean
+four times over while libk4a was not even present in the sanitizer build tree.
+
 ### Two traps in the scripting API
 
 Both cost real time here, so they are worth stating.
