@@ -15,7 +15,7 @@ namespace
 
 ossia::net::parameter_base* makeVec3(
     ossia::net::node_base& parent, const char* name, const char* description,
-    float bound, const char* unit)
+    float bound)
 {
   auto* node = parent.create_child(name);
   if(!node)
@@ -33,7 +33,12 @@ ossia::net::parameter_base* makeVec3(
   param->set_access(ossia::access_mode::GET);
   param->set_value_quiet(ossia::value{ossia::vec3f{0.f, 0.f, 0.f}});
   ossia::net::set_description(*node, description);
-  ossia::net::set_unit(*node, ossia::parse_pretty_unit(unit));
+
+  // No ossia unit. Its dataspaces are the ones it can convert between --
+  // distance, angle, gain, position, speed, time -- and neither acceleration
+  // nor angular velocity is among them. Tagging these as "distance" so the
+  // field is filled in would let a consumer convert metres per second squared
+  // as though they were metres; the description says what they are instead.
   return param;
 }
 
@@ -56,15 +61,15 @@ ImuTree::ImuTree(
   // The bounds are the widest full scale any of these cameras offers: 16 g for
   // the accelerometer, 2000 degrees per second for the gyroscope.
   m_accel = makeVec3(
-      *root, "accel", "Acceleration in metres per second squared, including "
-                      "gravity",
-      16.f * 9.80665f, "distance.m/s2");
+      *root, "accel",
+      "Acceleration in metres per second squared, including gravity",
+      16.f * 9.80665f);
   // std::numbers, not M_PI: MSVC does not define the POSIX math macros unless
   // _USE_MATH_DEFINES was set before <cmath>, and this is the only place in the
   // plug-in that needs one.
   m_gyro = makeVec3(
       *root, "gyro", "Angular velocity in radians per second",
-      float(2000. * std::numbers::pi / 180.), "");
+      float(2000. * std::numbers::pi / 180.));
 
   if(auto* node = root->create_child("temperature"))
   {
