@@ -16,6 +16,8 @@
 #include <libfreenect_registration.h>
 
 #include <atomic>
+#include <chrono>
+#include <climits>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -52,6 +54,10 @@ struct Address
   } kind{Any};
   std::string serial;
   int index{0};
+
+  /// "?motor=1": claim the motor subdevice as well. Off by default; see
+  /// backend_open for why that is not simply an oversight.
+  bool motor{};
 };
 
 Address parse_uri(const char* uri)
@@ -62,6 +68,16 @@ Address parse_uri(const char* uri)
   std::string s{uri};
   if(s.rfind("freenect:", 0) == 0)
     s = s.substr(9);
+
+  // Options come after a '?', as in a URL: "freenect:sn:A00365...?motor=1".
+  if(const auto q = s.find('?'); q != std::string::npos)
+  {
+    const auto opts = s.substr(q + 1);
+    s.resize(q);
+    a.motor = opts.find("motor=1") != std::string::npos
+              || opts.find("motor=true") != std::string::npos;
+  }
+
   if(s.empty())
     return a;
 
@@ -116,6 +132,57 @@ void release_float_holder(void* owner)
 {
   delete static_cast<FloatHolder*>(owner);
 }
+// --- controls ---------------------------------------------------------------
+
+/**
+ * The Kinect v1 has no image controls at all -- exposure, gain and white
+ * balance are fixed in firmware -- but it does have the two things no other
+ * camera here has: a tilt motor and a coloured LED, plus the accelerometer that
+ * comes with the motor board.
+ *
+ * All four are on the *motor* subdevice, a separate USB interface, and every
+ * one of them is a synchronous control transfer. libfreenect has no locking of
+ * its own, so none of these may be issued from another thread while
+ * freenect_process_events is running: writes are queued for the capture thread
+ * and reads come from what that thread last cached. That is also why the
+ * accelerometer costs nothing to publish -- the state arrives in one message
+ * along with the tilt angle.
+ */
+const char* const led_labels[]
+    = {"off", "green", "red", "yellow", "blink green", "5", "blink red/yellow"};
+
+const char* const tilt_status_labels[] = {"stopped", "limit", "2", "3", "moving"};
+
+struct ControlDef
+{
+  const char* id;
+  const char* name;
+  const char* description;
+  int kind;
+  int access;
+  double min, max, step, def;
+  const char* const* labels;
+  int label_count;
+};
+
+constexpr int no_labels = 0;
+
+const ControlDef freenect_controls[] = {
+    {"motor/tilt", "tilt", "Tilt angle in degrees from the horizon",
+     DEPTHCAM_CONTROL_INT, DEPTHCAM_ACCESS_READ | DEPTHCAM_ACCESS_WRITE, -30, 30, 1,
+     0, nullptr, no_labels},
+    {"motor/led", "LED", nullptr, DEPTHCAM_CONTROL_ENUM,
+     DEPTHCAM_ACCESS_WRITE, 0, 6, 1, 1, led_labels, 7},
+    {"sensors/tilt_status", "tilt status", nullptr, DEPTHCAM_CONTROL_ENUM,
+     DEPTHCAM_ACCESS_READ, 0, 4, 1, 0, tilt_status_labels, 5},
+    {"sensors/accel_x", "acceleration X", "In g", DEPTHCAM_CONTROL_FLOAT,
+     DEPTHCAM_ACCESS_READ, -4, 4, 0, 0, nullptr, no_labels},
+    {"sensors/accel_y", "acceleration Y", "In g", DEPTHCAM_CONTROL_FLOAT,
+     DEPTHCAM_ACCESS_READ, -4, 4, 0, 0, nullptr, no_labels},
+    {"sensors/accel_z", "acceleration Z", "In g", DEPTHCAM_CONTROL_FLOAT,
+     DEPTHCAM_ACCESS_READ, -4, 4, 0, 0, nullptr, no_labels},
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -123,6 +190,23 @@ void release_float_holder(void* owner)
 struct depthcam_device
 {
   freenect_device* dev{};
+
+  /// True when the motor subdevice came up. A Kinect for Windows, or a Kinect
+  /// whose motor interface is claimed by something else, has cameras but no
+  /// motor, and publishing controls that can never work is worse than none.
+  bool has_motor{};
+
+  // Read by get_control, written by the capture thread. See the note above
+  // freenect_controls: libfreenect is not safe to touch from two threads.
+  std::atomic<double> tilt_deg{0.};
+  std::atomic<int> tilt_status{0};
+  std::atomic<double> accel[3]{};
+
+  /// Pending writes, applied by the capture thread. INT_MIN / -1 mean "nothing
+  /// asked for".
+  std::atomic<int> want_tilt{INT_MIN};
+  std::atomic<int> want_led{-1};
+
 
   depthcam_open_config cfg{};
   bool color_pointcloud{};
@@ -321,6 +405,7 @@ void depthcam_device::emitPointCloud()
 
 void depthcam_device::run()
 {
+  int since_tilt = 0;
   while(running.load(std::memory_order_acquire))
   {
     // Returns after handling pending USB events or the 100ms timeout, so the
@@ -330,6 +415,38 @@ void depthcam_device::run()
     tv.tv_usec = 100000;
     if(freenect_process_events_timeout(g_ctx, &tv) < 0)
       break;
+
+    if(!has_motor)
+      continue;
+
+    // Everything below is a synchronous control transfer, and this is the only
+    // thread allowed to issue one.
+    if(const int t = want_tilt.exchange(INT_MIN); t != INT_MIN)
+      freenect_set_tilt_degs(dev, double(t));
+    if(const int l = want_led.exchange(-1); l >= 0)
+      freenect_set_led(dev, freenect_led_options(l));
+
+    // Twice a second: the state is a round trip over USB and nothing here
+    // moves fast enough to want more.
+    if(++since_tilt < 5)
+      continue;
+    since_tilt = 0;
+
+    if(freenect_update_tilt_state(dev) < 0)
+      continue;
+    auto* state = freenect_get_tilt_state(dev);
+    if(!state)
+      continue;
+
+    tilt_deg.store(freenect_get_tilt_degs(state), std::memory_order_relaxed);
+    tilt_status.store(int(freenect_get_tilt_status(state)), std::memory_order_relaxed);
+
+    double x{}, y{}, z{};
+    freenect_get_mks_accel(state, &x, &y, &z);
+    // freenect reports m/s^2 despite the name; g is the useful unit here.
+    accel[0].store(x / 9.80665, std::memory_order_relaxed);
+    accel[1].store(y / 9.80665, std::memory_order_relaxed);
+    accel[2].store(z / 9.80665, std::memory_order_relaxed);
   }
 }
 
@@ -353,11 +470,10 @@ int backend_init(const char*)
   // libfreenect logs at Notice on stdout by default.
   freenect_set_log_level(g_ctx, FREENECT_LOG_WARNING);
 
-  // The motor and audio subdevices are separate USB interfaces; only the camera
-  // is needed here, and asking for the others makes open fail on a Kinect whose
-  // audio firmware has not been uploaded.
-  freenect_select_subdevices(
-      g_ctx, static_cast<freenect_device_flags>(FREENECT_DEVICE_CAMERA));
+  // Which subdevices to claim is decided per-open, not here: see backend_open.
+  // Audio is never asked for -- it makes open fail on a Kinect whose audio
+  // firmware has not been uploaded, and nothing here uses it.
+  freenect_select_subdevices(g_ctx, FREENECT_DEVICE_CAMERA);
   return 1;
 }
 
@@ -423,33 +539,59 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
   dev->color_pointcloud = (config->streams & DEPTHCAM_STREAM_POINTCLOUD)
                           && config->color_pointcloud != 0;
 
-  int rc = -1;
-  switch(addr.kind)
-  {
-    case Address::Serial:
-      rc = freenect_open_device_by_camera_serial(g_ctx, &dev->dev, addr.serial.c_str());
-      if(rc < 0)
-      {
-        // No silent fallback to another camera.
-        set_error("Kinect v1 '" + addr.serial + "' is not connected");
-        return nullptr;
-      }
-      break;
-    case Address::Index:
-      rc = freenect_open_device(g_ctx, &dev->dev, addr.index);
-      break;
-    case Address::Any:
-      rc = freenect_open_device(g_ctx, &dev->dev, 0);
-      break;
-  }
+  const auto open_with = [&](freenect_device_flags flags) {
+    freenect_select_subdevices(g_ctx, flags);
+    switch(addr.kind)
+    {
+      case Address::Serial:
+        return freenect_open_device_by_camera_serial(
+            g_ctx, &dev->dev, addr.serial.c_str());
+      case Address::Index:
+        return freenect_open_device(g_ctx, &dev->dev, addr.index);
+      case Address::Any:
+      default:
+        return freenect_open_device(g_ctx, &dev->dev, 0);
+    }
+  };
+
+  // The motor is opt-in, and deliberately so.
+  //
+  // It carries the tilt, the LED and the accelerometer, and on the original
+  // model 1414 it is a plain second USB interface that costs nothing to claim.
+  // On a 1473 or a Kinect for Windows it is not: libfreenect drops the motor
+  // flag for those and enables the *audio* interface instead, because that is
+  // where the newer motor lives (usb_libusb10.c, fnusb_open_subdevices). Audio
+  // needs a firmware upload we do not ship, so the open then fails outright --
+  // and worse, the attempt resets the audio device, which takes the camera down
+  // with it for several seconds. A camera that streams is worth more than a
+  // tilt motor, so nothing is risked unless it was asked for.
+  int rc = open_with(
+      addr.motor ? freenect_device_flags(
+                       FREENECT_DEVICE_CAMERA | FREENECT_DEVICE_MOTOR)
+                 : FREENECT_DEVICE_CAMERA);
 
   if(rc < 0 || !dev->dev)
   {
-    set_error("could not open the Kinect v1");
+    if(addr.kind == Address::Serial)
+      set_error(
+          "Kinect v1 '" + addr.serial + "' is not connected"
+          + (addr.motor ? " (or its motor could not be claimed: a model 1473 "
+                          "and a Kinect for Windows drive the motor through the "
+                          "audio interface, which needs firmware this build does "
+                          "not ship -- drop ?motor=1 from the address)"
+                        : ""));
+    else
+      set_error("could not open the Kinect v1");
     return nullptr;
   }
 
   freenect_set_user(dev->dev, dev.get());
+
+  // freenect_select_subdevices is a request; libfreenect drops what it could
+  // not bring up, so this is the only way to know whether the motor is really
+  // there.
+  dev->has_motor
+      = (freenect_enabled_subdevices(g_ctx) & FREENECT_DEVICE_MOTOR) != 0;
 
   const auto video = freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM,
                                               FREENECT_VIDEO_RGB);
@@ -542,6 +684,72 @@ void backend_stop(depthcam_device* dev)
   }
 }
 
+int backend_list_controls(depthcam_device* dev, depthcam_control_cb cb, void* user)
+{
+  if(!dev || !cb || !dev->has_motor)
+    return 0;
+
+  for(const auto& d : freenect_controls)
+  {
+    depthcam_control c{};
+    c.id = d.id;
+    c.name = d.name;
+    c.description = d.description;
+    c.kind = d.kind;
+    c.access = d.access;
+    c.min = d.min;
+    c.max = d.max;
+    c.step = d.step;
+    c.def = d.def;
+    c.enum_labels = d.labels;
+    c.enum_count = d.label_count;
+    cb(&c, user);
+  }
+  return 1;
+}
+
+int backend_get_control(depthcam_device* dev, const char* id, double* out)
+{
+  if(!dev || !id || !out || !dev->has_motor)
+    return 0;
+
+  const std::string s{id};
+  if(s == "motor/tilt")
+    *out = dev->tilt_deg.load(std::memory_order_relaxed);
+  else if(s == "sensors/tilt_status")
+    *out = dev->tilt_status.load(std::memory_order_relaxed);
+  else if(s == "sensors/accel_x")
+    *out = dev->accel[0].load(std::memory_order_relaxed);
+  else if(s == "sensors/accel_y")
+    *out = dev->accel[1].load(std::memory_order_relaxed);
+  else if(s == "sensors/accel_z")
+    *out = dev->accel[2].load(std::memory_order_relaxed);
+  else
+    return 0;
+  return 1;
+}
+
+int backend_set_control(depthcam_device* dev, const char* id, double value)
+{
+  if(!dev || !id || !dev->has_motor)
+    return 0;
+
+  const std::string s{id};
+  if(s == "motor/tilt")
+  {
+    const int v = int(value < -30 ? -30 : (value > 30 ? 30 : value));
+    dev->want_tilt.store(v, std::memory_order_relaxed);
+    return 1;
+  }
+  if(s == "motor/led")
+  {
+    const int v = int(value < 0 ? 0 : (value > 6 ? 6 : value));
+    dev->want_led.store(v, std::memory_order_relaxed);
+    return 1;
+  }
+  return 0;
+}
+
 const depthcam_backend_v1 g_backend{
     .abi_version = DEPTHCAM_ABI_VERSION,
     .name = "freenect",
@@ -555,6 +763,9 @@ const depthcam_backend_v1 g_backend{
     .close = &backend_close,
     .start = &backend_start,
     .stop = &backend_stop,
+    .list_controls = &backend_list_controls,
+    .get_control = &backend_get_control,
+    .set_control = &backend_set_control,
 };
 
 } // namespace

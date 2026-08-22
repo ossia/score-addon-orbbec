@@ -9,7 +9,10 @@
 
 #include <librealsense2/rs.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cctype>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -129,6 +132,62 @@ struct EnumEntry
 {
   std::string uri, name, serial, transport;
 };
+// --- controls ---------------------------------------------------------------
+
+/**
+ * @brief Turn RS2_OPTION_ENABLE_AUTO_EXPOSURE into "auto_exposure".
+ *
+ * rs2_option_to_string gives "Enable Auto Exposure": human-readable, but not an
+ * address. The enum spelling is the stable one, so that is what is used.
+ */
+std::string option_slug(rs2_option opt)
+{
+  std::string n = rs2_option_to_string(opt);
+  for(auto& c : n)
+    c = (c == ' ' || c == '-' || c == '/') ? '_'
+                                           : char(std::tolower((unsigned char)c));
+  return n;
+}
+
+/**
+ * @brief Which group a sensor's options land in.
+ *
+ * librealsense names its sensors after the hardware block -- "Stereo Module",
+ * "RGB Camera", "Motion Module" -- and every option belongs to exactly one, so
+ * the sensor is the natural category. Anything unrecognised keeps its own name
+ * rather than being lumped together, because a camera we have never seen is
+ * exactly the case where guessing is wrong.
+ */
+std::string sensor_group(const std::string& name)
+{
+  std::string n = name;
+  for(auto& c : n)
+    c = (c == ' ' || c == '-') ? '_' : char(std::tolower((unsigned char)c));
+
+  if(n.find("stereo") != std::string::npos || n.find("depth") != std::string::npos)
+    return "depth";
+  if(n.find("rgb") != std::string::npos || n.find("color") != std::string::npos)
+    return "color";
+  if(n.find("motion") != std::string::npos)
+    return "imu";
+  if(n.find("safety") != std::string::npos)
+    return "safety";
+  return n.empty() ? "device" : n;
+}
+
+/// One option, plus the sensor it has to be addressed through.
+struct ControlEntry
+{
+  rs2::sensor sensor;
+  rs2_option option{};
+  std::string path;
+  std::string name;
+  std::string description;
+  std::vector<std::string> labels;
+  std::vector<const char*> label_ptrs;
+  depthcam_control desc{};
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -140,6 +199,10 @@ struct depthcam_device
   std::unique_ptr<rs2::align> align;
   rs2::pointcloud pointcloud;
 
+  /// Kept only for the controls: an rs2::device is a handle, so holding it
+  /// alongside the pipeline costs nothing and does not claim the camera twice.
+  rs2::device rsdev;
+
   depthcam_open_config cfg{};
   std::string serial;
   bool color_pointcloud{};
@@ -150,6 +213,13 @@ struct depthcam_device
   void* user{};
 
   std::vector<float> cloud_buf;
+
+  std::vector<ControlEntry> controls;
+  bool controls_scanned{};
+  std::mutex control_lock;
+
+  void scanControls();
+  ControlEntry* findControl(const char* id);
 
   void handle(const rs2::frameset& fs);
   void emitImage(uint32_t stream, const rs2::video_frame& f, float depth_unit);
@@ -337,6 +407,163 @@ void depthcam_device::emitPointCloud(const rs2::frameset& fs)
   }
 }
 
+void depthcam_device::scanControls()
+{
+  if(controls_scanned)
+    return;
+  controls_scanned = true;
+
+  std::vector<rs2::sensor> sensors;
+  try
+  {
+    sensors = rsdev.query_sensors();
+  }
+  catch(...)
+  {
+    return;
+  }
+
+  for(auto& sensor : sensors)
+  {
+    std::string sname;
+    try
+    {
+      if(sensor.supports(RS2_CAMERA_INFO_NAME))
+        sname = sensor.get_info(RS2_CAMERA_INFO_NAME);
+    }
+    catch(...)
+    {
+    }
+    const auto group = sensor_group(sname);
+
+    std::vector<rs2_option> options;
+    try
+    {
+      options = sensor.get_supported_options();
+    }
+    catch(...)
+    {
+      continue;
+    }
+
+    for(auto opt : options)
+    {
+      ControlEntry e;
+      e.sensor = sensor;
+      e.option = opt;
+      e.name = rs2_option_to_string(opt);
+
+      rs2::option_range range{};
+      bool read_only = false;
+      try
+      {
+        if(!sensor.supports(opt))
+          continue;
+        range = sensor.get_option_range(opt);
+        read_only = sensor.is_option_read_only(opt);
+        if(sensor.supports(opt))
+          e.description = sensor.get_option_description(opt);
+      }
+      catch(...)
+      {
+        // An option the sensor lists but refuses to describe is not usable.
+        continue;
+      }
+
+      // Read-only options are temperatures, frame counters and the settings an
+      // `auto` mode chose for itself: worth watching, never worth a slider next
+      // to the ones that do something. The sensor name stays in the leaf there,
+      // because two sensors each report their own temperature.
+      e.path = read_only ? "sensors/" + group + "_" + option_slug(opt)
+                         : group + "/" + option_slug(opt);
+
+      if(std::any_of(controls.begin(), controls.end(), [&](const ControlEntry& o) {
+           return o.path == e.path;
+         }))
+        continue;
+
+      auto& d = e.desc;
+      d.access = DEPTHCAM_ACCESS_READ | (read_only ? 0 : DEPTHCAM_ACCESS_WRITE);
+      d.min = range.min;
+      d.max = range.max;
+      d.step = range.step;
+      d.def = range.def;
+
+      // Every librealsense option is a float over the wire; the range is what
+      // says whether it is really a switch, a menu or a number.
+      const bool integral = range.step >= 1.f
+                            && range.min == std::floor(range.min)
+                            && range.max == std::floor(range.max);
+
+      if(integral && range.min == 0.f && range.max == 1.f && range.step == 1.f)
+      {
+        d.kind = DEPTHCAM_CONTROL_BOOL;
+      }
+      else if(integral && (range.max - range.min) <= 32.f)
+      {
+        // Values with names are a menu. get_option_value_description returns
+        // null for anything that is just a number, so this only fires for the
+        // handful that really are enumerations (visual preset, sequence id).
+        bool named = false;
+        for(float v = range.min; v <= range.max; v += range.step)
+        {
+          const char* label = nullptr;
+          try
+          {
+            label = sensor.get_option_value_description(opt, v);
+          }
+          catch(...)
+          {
+          }
+          e.labels.push_back(label ? label : std::to_string(int(v)));
+          named = named || (label != nullptr);
+        }
+        if(named)
+        {
+          d.kind = DEPTHCAM_CONTROL_ENUM;
+        }
+        else
+        {
+          e.labels.clear();
+          d.kind = DEPTHCAM_CONTROL_INT;
+        }
+      }
+      else
+      {
+        d.kind = integral ? DEPTHCAM_CONTROL_INT : DEPTHCAM_CONTROL_FLOAT;
+      }
+
+      controls.push_back(std::move(e));
+    }
+  }
+
+  // Point the descriptors at their owner's stable storage, after the vector has
+  // stopped reallocating.
+  for(auto& e : controls)
+  {
+    e.label_ptrs.clear();
+    e.label_ptrs.reserve(e.labels.size());
+    for(const auto& l : e.labels)
+      e.label_ptrs.push_back(l.c_str());
+
+    e.desc.id = e.path.c_str();
+    e.desc.name = e.name.c_str();
+    e.desc.description = e.description.empty() ? nullptr : e.description.c_str();
+    e.desc.enum_labels = e.label_ptrs.empty() ? nullptr : e.label_ptrs.data();
+    e.desc.enum_count = int32_t(e.label_ptrs.size());
+  }
+}
+
+ControlEntry* depthcam_device::findControl(const char* id)
+{
+  if(!id)
+    return nullptr;
+  for(auto& e : controls)
+    if(e.path == id)
+      return &e;
+  return nullptr;
+}
+
 void depthcam_device::handle(const rs2::frameset& frames)
 {
   if(!running.load(std::memory_order_acquire))
@@ -456,6 +683,69 @@ void backend_set_changed_callback(depthcam_changed_cb cb, void* user)
   g_changed_user = user;
 }
 
+int backend_list_controls(
+    depthcam_device* dev, depthcam_control_cb cb, void* user)
+{
+  if(!dev || !cb)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+  dev->scanControls();
+  for(const auto& e : dev->controls)
+    cb(&e.desc, user);
+  return 1;
+}
+
+int backend_get_control(depthcam_device* dev, const char* id, double* out)
+{
+  if(!dev || !out)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+  auto* e = dev->findControl(id);
+  if(!e || !(e->desc.access & DEPTHCAM_ACCESS_READ))
+    return 0;
+  try
+  {
+    *out = double(e->sensor.get_option(e->option));
+    return 1;
+  }
+  catch(const std::exception& ex)
+  {
+    set_error(ex.what());
+    return 0;
+  }
+  catch(...)
+  {
+    return 0;
+  }
+}
+
+int backend_set_control(depthcam_device* dev, const char* id, double value)
+{
+  if(!dev)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+  auto* e = dev->findControl(id);
+  if(!e || !(e->desc.access & DEPTHCAM_ACCESS_WRITE))
+    return 0;
+  try
+  {
+    e->sensor.set_option(e->option, float(value));
+    return 1;
+  }
+  catch(const std::exception& ex)
+  {
+    // Routine rather than exceptional: several options are only writable while
+    // their `auto` counterpart is off, and librealsense reports that by
+    // throwing.
+    set_error(ex.what());
+    return 0;
+  }
+  catch(...)
+  {
+    return 0;
+  }
+}
+
 depthcam_device* backend_open(const char* uri, const depthcam_open_config* config)
 {
   if(!g_context || !config)
@@ -502,6 +792,11 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
 
     auto dev = std::make_unique<depthcam_device>();
     dev->cfg = *config;
+
+    // Held for the controls; see depthcam_device::rsdev.
+    for(auto&& d : devices)
+      if(info_of(d, RS2_CAMERA_INFO_SERIAL_NUMBER) == serial)
+        dev->rsdev = d;
 
     const bool want_cloud = (config->streams & DEPTHCAM_STREAM_POINTCLOUD) != 0;
     dev->color_pointcloud = want_cloud && config->color_pointcloud != 0
@@ -672,6 +967,9 @@ const depthcam_backend_v1 g_backend{
     .close = &backend_close,
     .start = &backend_start,
     .stop = &backend_stop,
+    .list_controls = &backend_list_controls,
+    .get_control = &backend_get_control,
+    .set_control = &backend_set_control,
 };
 
 } // namespace

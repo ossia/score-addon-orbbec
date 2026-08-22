@@ -96,6 +96,57 @@ Address parse_uri(const char* uri)
     a.kind = Address::Any;
   return a;
 }
+// --- controls ---------------------------------------------------------------
+
+/**
+ * The Kinect v2's colour camera has three exposure modes and no getters at all:
+ * libfreenect2 offers setColorAutoExposure / setColorSemiAutoExposure /
+ * setColorManualExposure and nothing that reads back. So the values published
+ * here are what was last written, seeded with libfreenect2's own defaults --
+ * which is the honest thing to show, and the only thing available.
+ *
+ * The three modes take different parameters, and writing any parameter also
+ * re-applies the mode it belongs to, so setting `integration_time` puts the
+ * camera in manual rather than being silently ignored.
+ */
+enum class ExposureMode
+{
+  Auto = 0,
+  SemiAuto,
+  Manual
+};
+
+const char* const exposure_mode_labels[] = {"auto", "semi-auto", "manual"};
+
+struct ControlDef
+{
+  const char* id;
+  const char* name;
+  const char* description;
+  int kind;
+  double min, max, step, def;
+  const char* const* labels;
+  int label_count;
+};
+
+const ControlDef freenect2_controls[] = {
+    {"color/exposure_mode", "exposure mode",
+     "Which of the three exposure controls the camera obeys",
+     DEPTHCAM_CONTROL_ENUM, 0, 2, 1, 0, exposure_mode_labels, 3},
+    {"color/exposure_compensation", "exposure compensation",
+     "Automatic mode only, in stops", DEPTHCAM_CONTROL_FLOAT, -2, 2, 0, 0,
+     nullptr, 0},
+    {"color/pseudo_exposure_time", "pseudo exposure time",
+     "Semi-automatic mode only, in milliseconds; the camera trades integration "
+     "time against gain to reach it",
+     DEPTHCAM_CONTROL_FLOAT, 0, 640, 0, 33, nullptr, 0},
+    {"color/integration_time", "integration time",
+     "Manual mode only, in milliseconds", DEPTHCAM_CONTROL_FLOAT, 0.5, 66, 0,
+     33, nullptr, 0},
+    {"color/analog_gain", "analog gain", "Manual mode only",
+     DEPTHCAM_CONTROL_FLOAT, 1.0, 1.5, 0, 1.0, nullptr, 0},
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -127,6 +178,16 @@ struct depthcam_device
   std::vector<unsigned char> undistorted_buf;
   std::vector<unsigned char> registered_buf;
   std::vector<float> cloud_buf;
+
+  /// Mirrors of what was last written; libfreenect2 has no getters.
+  std::mutex control_lock;
+  ExposureMode exposure_mode{ExposureMode::Auto};
+  double exposure_compensation{0.};
+  double pseudo_exposure_ms{33.};
+  double integration_ms{33.};
+  double analog_gain{1.};
+
+  void applyExposure();
 
   ~depthcam_device();
 
@@ -338,6 +399,40 @@ void depthcam_device::onFrame(
   // clouds for 8 depth frames in a 5s run.
   if(keep_for_cloud && type == libfreenect2::Frame::Depth)
     emitPointCloud();
+}
+
+void depthcam_device::applyExposure()
+{
+  // Caller holds control_lock.
+  //
+  // Only while streaming: these are bulk command transactions on the control
+  // endpoint, and a Kinect v2 that has not been started answers none of them
+  // (LIBUSB_ERROR_TIMEOUT, once per call, ten seconds each). The values are
+  // kept regardless and re-applied from backend_start, so a setting made while
+  // the transport is stopped is not lost -- it just takes effect on play.
+  if(!dev || !running.load(std::memory_order_acquire))
+    return;
+  try
+  {
+    switch(exposure_mode)
+    {
+      case ExposureMode::Auto:
+        dev->setColorAutoExposure(float(exposure_compensation));
+        break;
+      case ExposureMode::SemiAuto:
+        dev->setColorSemiAutoExposure(float(pseudo_exposure_ms));
+        break;
+      case ExposureMode::Manual:
+        dev->setColorManualExposure(float(integration_ms), float(analog_gain));
+        break;
+    }
+  }
+  catch(...)
+  {
+    // libfreenect2 writes these as raw commands to the device and can throw on
+    // a camera that has gone away; a failed setting is not worth taking the
+    // stream down for.
+  }
 }
 
 void depthcam_device::emitPointCloud()
@@ -631,6 +726,12 @@ int backend_start(depthcam_device* dev, depthcam_frame_cb on_frame, void* user)
     return 0;
   }
 
+  // Whatever was set while the transport was stopped; see applyExposure.
+  {
+    std::lock_guard lock{dev->control_lock};
+    dev->applyExposure();
+  }
+
   if(dev->cfg.streams & DEPTHCAM_STREAM_POINTCLOUD)
   {
     // Only valid once the device is started: the parameters are read from the
@@ -652,6 +753,97 @@ void backend_stop(depthcam_device* dev)
     dev->dev->stop();
 }
 
+int backend_list_controls(depthcam_device* dev, depthcam_control_cb cb, void* user)
+{
+  if(!dev || !dev->dev || !cb)
+    return 0;
+
+  for(const auto& d : freenect2_controls)
+  {
+    depthcam_control c{};
+    c.id = d.id;
+    c.name = d.name;
+    c.description = d.description;
+    c.kind = d.kind;
+    // Readable only in the sense that we remember what we wrote; see the note
+    // above freenect2_controls.
+    c.access = DEPTHCAM_ACCESS_READ | DEPTHCAM_ACCESS_WRITE;
+    c.min = d.min;
+    c.max = d.max;
+    c.step = d.step;
+    c.def = d.def;
+    c.enum_labels = d.labels;
+    c.enum_count = d.label_count;
+    cb(&c, user);
+  }
+  return 1;
+}
+
+int backend_get_control(depthcam_device* dev, const char* id, double* out)
+{
+  if(!dev || !id || !out)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+
+  const std::string s{id};
+  if(s == "color/exposure_mode")
+    *out = double(int(dev->exposure_mode));
+  else if(s == "color/exposure_compensation")
+    *out = dev->exposure_compensation;
+  else if(s == "color/pseudo_exposure_time")
+    *out = dev->pseudo_exposure_ms;
+  else if(s == "color/integration_time")
+    *out = dev->integration_ms;
+  else if(s == "color/analog_gain")
+    *out = dev->analog_gain;
+  else
+    return 0;
+  return 1;
+}
+
+int backend_set_control(depthcam_device* dev, const char* id, double value)
+{
+  if(!dev || !dev->dev || !id)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+
+  const std::string s{id};
+  if(s == "color/exposure_mode")
+  {
+    const int v = int(value);
+    if(v < 0 || v > 2)
+      return 0;
+    dev->exposure_mode = ExposureMode(v);
+  }
+  else if(s == "color/exposure_compensation")
+  {
+    dev->exposure_compensation = value;
+    dev->exposure_mode = ExposureMode::Auto;
+  }
+  else if(s == "color/pseudo_exposure_time")
+  {
+    dev->pseudo_exposure_ms = value;
+    dev->exposure_mode = ExposureMode::SemiAuto;
+  }
+  else if(s == "color/integration_time")
+  {
+    dev->integration_ms = value;
+    dev->exposure_mode = ExposureMode::Manual;
+  }
+  else if(s == "color/analog_gain")
+  {
+    dev->analog_gain = value;
+    dev->exposure_mode = ExposureMode::Manual;
+  }
+  else
+  {
+    return 0;
+  }
+
+  dev->applyExposure();
+  return 1;
+}
+
 const depthcam_backend_v1 g_backend{
     .abi_version = DEPTHCAM_ABI_VERSION,
     .name = "freenect2",
@@ -665,6 +857,9 @@ const depthcam_backend_v1 g_backend{
     .close = &backend_close,
     .start = &backend_start,
     .stop = &backend_stop,
+    .list_controls = &backend_list_controls,
+    .get_control = &backend_get_control,
+    .set_control = &backend_set_control,
 };
 
 } // namespace

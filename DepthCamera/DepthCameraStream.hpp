@@ -42,6 +42,11 @@ public:
 
   bool valid() const noexcept { return m_device != nullptr; }
 
+  /// The open camera, for the settings tree. Null until a successful open, and
+  /// only valid for as long as this object lives.
+  depthcam_device* device() const noexcept { return m_device; }
+  const depthcam_backend_v1* backend() const noexcept { return m_backend; }
+
   StreamOutput m_rgb;
   StreamOutput m_depth;
   StreamOutput m_ir;

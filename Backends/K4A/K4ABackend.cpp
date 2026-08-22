@@ -62,7 +62,16 @@ struct K4AApi
   k4a_result_t (*device_get_calibration)(
       k4a_device_t, k4a_depth_mode_t, k4a_color_resolution_t, k4a_calibration_t*);
 
+  k4a_result_t (*device_get_color_control_capabilities)(
+      k4a_device_t, k4a_color_control_command_t, bool*, int32_t*, int32_t*, int32_t*,
+      int32_t*, k4a_color_control_mode_t*);
+  k4a_result_t (*device_get_color_control)(
+      k4a_device_t, k4a_color_control_command_t, k4a_color_control_mode_t*, int32_t*);
+  k4a_result_t (*device_set_color_control)(
+      k4a_device_t, k4a_color_control_command_t, k4a_color_control_mode_t, int32_t);
+
   void (*capture_release)(k4a_capture_t);
+  float (*capture_get_temperature_c)(k4a_capture_t);
   k4a_image_t (*capture_get_color_image)(k4a_capture_t);
   k4a_image_t (*capture_get_depth_image)(k4a_capture_t);
   k4a_image_t (*capture_get_ir_image)(k4a_capture_t);
@@ -168,7 +177,12 @@ bool load_k4a(K4AApi& api, const char* resource_dir)
   sym(api.device_stop_cameras, "k4a_device_stop_cameras");
   sym(api.device_get_capture, "k4a_device_get_capture");
   sym(api.device_get_calibration, "k4a_device_get_calibration");
+  sym(api.device_get_color_control_capabilities,
+      "k4a_device_get_color_control_capabilities");
+  sym(api.device_get_color_control, "k4a_device_get_color_control");
+  sym(api.device_set_color_control, "k4a_device_set_color_control");
   sym(api.capture_release, "k4a_capture_release");
+  sym(api.capture_get_temperature_c, "k4a_capture_get_temperature_c");
   sym(api.capture_get_color_image, "k4a_capture_get_color_image");
   sym(api.capture_get_depth_image, "k4a_capture_get_depth_image");
   sym(api.capture_get_ir_image, "k4a_capture_get_ir_image");
@@ -288,6 +302,55 @@ struct EnumEntry
   std::string uri, serial;
 };
 
+// --- controls ---------------------------------------------------------------
+
+/**
+ * libk4a has no enumeration: the commands are a fixed list in k4atypes.h, and
+ * the only thing that varies per camera is the range, which
+ * k4a_device_get_color_control_capabilities reports. So unlike Orbbec and
+ * librealsense the list is written out here, and the capabilities call decides
+ * what actually makes it into the tree.
+ *
+ * Every colour control has a mode as well as a value. A camera left in AUTO
+ * ignores writes to the value, which is confusing enough on its own; the
+ * `_auto` switch beside each one that supports it makes the pairing visible,
+ * and writing a value pushes the control to MANUAL because that is invariably
+ * what the writer meant.
+ */
+struct ColorControlDef
+{
+  k4a_color_control_command_t command;
+  const char* slug;
+  const char* description;
+};
+
+constexpr ColorControlDef color_controls[] = {
+    {K4A_COLOR_CONTROL_EXPOSURE_TIME_ABSOLUTE, "exposure_time",
+     "Exposure time in microseconds"},
+    {K4A_COLOR_CONTROL_BRIGHTNESS, "brightness", nullptr},
+    {K4A_COLOR_CONTROL_CONTRAST, "contrast", nullptr},
+    {K4A_COLOR_CONTROL_SATURATION, "saturation", nullptr},
+    {K4A_COLOR_CONTROL_SHARPNESS, "sharpness", nullptr},
+    {K4A_COLOR_CONTROL_WHITEBALANCE, "white_balance",
+     "Colour temperature in degrees Kelvin"},
+    {K4A_COLOR_CONTROL_BACKLIGHT_COMPENSATION, "backlight_compensation", nullptr},
+    {K4A_COLOR_CONTROL_GAIN, "gain", nullptr},
+    {K4A_COLOR_CONTROL_POWERLINE_FREQUENCY, "powerline_frequency",
+     "1 = 50 Hz, 2 = 60 Hz"},
+};
+
+struct ControlEntry
+{
+  /// The command this addresses, or -1 for the two that are not colour
+  /// controls: the auto/manual switches and the temperature readout.
+  int command{-1};
+  bool is_mode{};      ///< the `_auto` switch rather than the value
+  bool is_temperature{};
+  std::string path;
+  std::string name;
+  depthcam_control desc{};
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -313,6 +376,16 @@ struct depthcam_device
   k4a_image_t transformed_color{};
   k4a_image_t transformed_depth{};
   std::vector<float> cloud_buf;
+
+  std::vector<ControlEntry> controls;
+  bool controls_scanned{};
+  std::mutex control_lock;
+  /// Reported per capture rather than polled: k4a_capture_get_temperature_c is
+  /// the only way to read it, so the capture thread caches the last one.
+  std::atomic<float> temperature{0.f};
+
+  void scanControls();
+  ControlEntry* findControl(const char* id);
 
   ~depthcam_device();
 
@@ -510,6 +583,10 @@ void depthcam_device::emitPointCloud(k4a_image_t depth, k4a_image_t color)
 
 void depthcam_device::handleCapture(k4a_capture_t capture)
 {
+  if(g_k4a.capture_get_temperature_c)
+    temperature.store(
+        g_k4a.capture_get_temperature_c(capture), std::memory_order_relaxed);
+
   k4a_image_t color = g_k4a.capture_get_color_image(capture);
   k4a_image_t depth = g_k4a.capture_get_depth_image(capture);
   k4a_image_t ir = g_k4a.capture_get_ir_image(capture);
@@ -557,10 +634,173 @@ void depthcam_device::run()
   }
 }
 
+void depthcam_device::scanControls()
+{
+  if(controls_scanned)
+    return;
+  controls_scanned = true;
+
+  if(!dev || !g_k4a.device_get_color_control_capabilities)
+    return;
+
+  for(const auto& def : color_controls)
+  {
+    bool supports_auto = false;
+    int32_t min = 0, max = 0, step = 0, def_value = 0;
+    k4a_color_control_mode_t def_mode = K4A_COLOR_CONTROL_MODE_MANUAL;
+
+    if(g_k4a.device_get_color_control_capabilities(
+           dev, def.command, &supports_auto, &min, &max, &step, &def_value, &def_mode)
+       != K4A_RESULT_SUCCEEDED)
+      continue;
+
+    // A camera that reports an empty range does not really have the control.
+    if(max <= min)
+      continue;
+
+    ControlEntry e;
+    e.command = int(def.command);
+    e.path = std::string{"color/"} + def.slug;
+    e.name = def.slug;
+    e.desc.kind = DEPTHCAM_CONTROL_INT;
+    e.desc.access = DEPTHCAM_ACCESS_READ | DEPTHCAM_ACCESS_WRITE;
+    e.desc.min = min;
+    e.desc.max = max;
+    e.desc.step = step > 0 ? step : 1;
+    e.desc.def = def_value;
+    e.desc.description = def.description;
+    controls.push_back(std::move(e));
+
+    if(supports_auto)
+    {
+      ControlEntry m;
+      m.command = int(def.command);
+      m.is_mode = true;
+      m.path = std::string{"color/"} + def.slug + "_auto";
+      m.name = std::string{def.slug} + " auto";
+      m.desc.kind = DEPTHCAM_CONTROL_BOOL;
+      m.desc.access = DEPTHCAM_ACCESS_READ | DEPTHCAM_ACCESS_WRITE;
+      m.desc.min = 0;
+      m.desc.max = 1;
+      m.desc.step = 1;
+      m.desc.def = def_mode == K4A_COLOR_CONTROL_MODE_AUTO ? 1 : 0;
+      controls.push_back(std::move(m));
+    }
+  }
+
+  if(g_k4a.capture_get_temperature_c)
+  {
+    ControlEntry t;
+    t.is_temperature = true;
+    t.path = "sensors/temperature";
+    t.name = "temperature";
+    t.desc.kind = DEPTHCAM_CONTROL_FLOAT;
+    t.desc.access = DEPTHCAM_ACCESS_READ;
+    t.desc.min = -40;
+    t.desc.max = 125;
+    t.desc.step = 0;
+    t.desc.def = 0;
+    t.desc.description
+        = "Colour sensor temperature in degrees Celsius, as of the last capture";
+    controls.push_back(std::move(t));
+  }
+
+  // After the vector has stopped reallocating.
+  for(auto& e : controls)
+  {
+    e.desc.id = e.path.c_str();
+    e.desc.name = e.name.c_str();
+  }
+}
+
+ControlEntry* depthcam_device::findControl(const char* id)
+{
+  if(!id)
+    return nullptr;
+  for(auto& e : controls)
+    if(e.path == id)
+      return &e;
+  return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 
 namespace
 {
+
+int backend_list_controls(depthcam_device* dev, depthcam_control_cb cb, void* user)
+{
+  if(!dev || !cb)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+  dev->scanControls();
+  for(const auto& e : dev->controls)
+    cb(&e.desc, user);
+  return 1;
+}
+
+int backend_get_control(depthcam_device* dev, const char* id, double* out)
+{
+  if(!dev || !out)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+  auto* e = dev->findControl(id);
+  if(!e)
+    return 0;
+
+  if(e->is_temperature)
+  {
+    *out = dev->temperature.load(std::memory_order_relaxed);
+    return 1;
+  }
+
+  if(!g_k4a.device_get_color_control)
+    return 0;
+
+  k4a_color_control_mode_t mode{};
+  int32_t value{};
+  if(g_k4a.device_get_color_control(
+         dev->dev, k4a_color_control_command_t(e->command), &mode, &value)
+     != K4A_RESULT_SUCCEEDED)
+    return 0;
+
+  *out = e->is_mode ? (mode == K4A_COLOR_CONTROL_MODE_AUTO ? 1. : 0.) : double(value);
+  return 1;
+}
+
+int backend_set_control(depthcam_device* dev, const char* id, double value)
+{
+  if(!dev || !g_k4a.device_set_color_control || !g_k4a.device_get_color_control)
+    return 0;
+  std::lock_guard lock{dev->control_lock};
+  auto* e = dev->findControl(id);
+  if(!e || e->is_temperature)
+    return 0;
+
+  const auto command = k4a_color_control_command_t(e->command);
+
+  if(e->is_mode)
+  {
+    // Switching to manual has to carry a value, and the only sensible one is
+    // whatever the camera settled on while it was automatic -- otherwise the
+    // picture jumps the moment the switch is flipped.
+    k4a_color_control_mode_t current{};
+    int32_t held{};
+    g_k4a.device_get_color_control(dev->dev, command, &current, &held);
+
+    return g_k4a.device_set_color_control(
+               dev->dev, command,
+               value != 0. ? K4A_COLOR_CONTROL_MODE_AUTO
+                           : K4A_COLOR_CONTROL_MODE_MANUAL,
+               held)
+           == K4A_RESULT_SUCCEEDED;
+  }
+
+  // Writing a value means the writer wants that value, so leave auto behind.
+  return g_k4a.device_set_color_control(
+             dev->dev, command, K4A_COLOR_CONTROL_MODE_MANUAL, int32_t(value))
+         == K4A_RESULT_SUCCEEDED;
+}
 
 int backend_init(const char* resource_dir)
 {
@@ -830,6 +1070,9 @@ const depthcam_backend_v1 g_backend{
     .close = &backend_close,
     .start = &backend_start,
     .stop = &backend_stop,
+    .list_controls = &backend_list_controls,
+    .get_control = &backend_get_control,
+    .set_control = &backend_set_control,
 };
 
 } // namespace

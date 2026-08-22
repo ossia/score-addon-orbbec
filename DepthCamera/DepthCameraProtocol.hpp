@@ -14,6 +14,7 @@
 #include <ossia/network/generic/generic_device.hpp>
 #include <ossia/network/generic/generic_node.hpp>
 
+#include <DepthCamera/DepthCameraControls.hpp>
 #include <DepthCamera/DepthCameraStream.hpp>
 #include <DepthCamera/DepthCameraSettings.hpp>
 
@@ -125,8 +126,14 @@ public:
   /// reaches stop_execution.
   void registerExtractor(std::shared_ptr<InputStreamExtractor> dec);
 
+  /// Non-owning. The tree belongs to the device, which destroys it before
+  /// ossia clears the nodes its parameters live in, and clears this first so a
+  /// write arriving in between cannot reach a dying object.
+  void setControls(ControlTree* c) noexcept { m_controls = c; }
+
 private:
   std::vector<std::shared_ptr<InputStreamExtractor>> m_extractors;
+  ControlTree* m_controls{};
 };
 
 class depthcam_device_impl : public ossia::net::generic_device
@@ -135,6 +142,19 @@ public:
   depthcam_device_impl(
       const DepthCameraSettings& settings, GfxExecutionAction& ctx,
       std::unique_ptr<depthcam_protocol> proto, std::string name);
+  ~depthcam_device_impl();
+
+  /// Drops the settings tree.
+  ///
+  /// Has to happen before anything clears the node tree, because the settings
+  /// tree points at the parameters those nodes own --
+  /// Device::DeviceInterface::disconnect() calls root.clear_children(), so the
+  /// device object outlives its own parameters by a good margin on a reconnect
+  /// or a device removal.
+  void releaseControls() noexcept;
+
+private:
+  std::unique_ptr<ControlTree> m_controls;
 };
 
 }

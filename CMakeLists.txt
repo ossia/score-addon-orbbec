@@ -115,6 +115,8 @@ add_library(score_addon_orbbec
   DepthCamera/DepthCameraDevice.cpp
   DepthCamera/DepthCameraProtocol.hpp
   DepthCamera/DepthCameraProtocol.cpp
+  DepthCamera/DepthCameraControls.hpp
+  DepthCamera/DepthCameraControls.cpp
 
   score_addon_orbbec.hpp
   score_addon_orbbec.cpp

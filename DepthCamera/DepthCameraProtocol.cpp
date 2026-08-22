@@ -374,28 +374,42 @@ depthcam_protocol::depthcam_protocol(
 
 depthcam_protocol::~depthcam_protocol() = default;
 
-bool depthcam_protocol::pull(ossia::net::parameter_base&)
+// The four hooks below only ever concern the `controls` subtree: the stream
+// parameters are textures and geometry, which the graphics graph pulls
+// directly and which carry no value for the network layer to move.
+bool depthcam_protocol::pull(ossia::net::parameter_base& p)
 {
-  return false;
+  return m_controls && m_controls->read(p);
 }
 
-bool depthcam_protocol::push(const ossia::net::parameter_base&, const ossia::value&)
+bool depthcam_protocol::push(
+    const ossia::net::parameter_base& p, const ossia::value& v)
 {
-  return false;
+  return m_controls && m_controls->write(p, v);
 }
 
 bool depthcam_protocol::push_raw(const ossia::net::full_parameter_data&)
 {
+  // Nothing here is addressable without its parameter: a raw push carries an
+  // address and a value but no descriptor, and every control needs its kind and
+  // range to be interpreted.
   return false;
 }
 
-bool depthcam_protocol::observe(ossia::net::parameter_base&, bool)
+bool depthcam_protocol::observe(ossia::net::parameter_base& p, bool enable)
 {
-  return false;
+  // ossia calls this when a parameter gains its first callback and loses its
+  // last, which is exactly the signal needed to decide whether a read-only
+  // sensor is worth polling.
+  return m_controls && m_controls->observe(p, enable);
 }
 
 bool depthcam_protocol::update(ossia::net::node_base&)
 {
+  // The tree is fixed once the camera is open, so there is nothing to explore;
+  // re-reading the settings is still the useful thing to do on a refresh.
+  if(m_controls)
+    m_controls->refresh();
   return false;
 }
 
@@ -477,6 +491,34 @@ depthcam_device_impl::depthcam_device_impl(
     this->add_child(std::make_unique<depthcam_node>(
         dec, depthcam_node::Kind::PointCloud, ctx, *this, "pointcloud"));
   }
+
+  // Last, so the streams stay at the top of the explorer: a camera can publish
+  // fifty settings and the four things a user is looking for should not be at
+  // the bottom of that list.
+  if(auto* backend = stream->backend(); backend && stream->device())
+  {
+    auto tree = std::make_unique<ControlTree>(
+        *backend, *stream->device(), *this, *this);
+    if(!tree->empty())
+    {
+      protocol.setControls(tree.get());
+      m_controls = std::move(tree);
+    }
+  }
+}
+
+void depthcam_device_impl::releaseControls() noexcept
+{
+  // The protocol must stop routing writes here before the tree goes.
+  static_cast<depthcam_protocol&>(*m_protocol).setControls(nullptr);
+  m_controls.reset();
+}
+
+depthcam_device_impl::~depthcam_device_impl()
+{
+  // Usually already done from InputDevice::disconnect(); this covers the paths
+  // that destroy the device without going through it.
+  releaseControls();
 }
 
 }

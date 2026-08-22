@@ -33,6 +33,7 @@ public:
 
 private:
   bool reconnect() override;
+  void disconnect() override;
   ossia::net::device_base* getDevice() const override { return m_dev.get(); }
 
   std::unique_ptr<ossia::net::device_base> m_dev;
@@ -48,6 +49,16 @@ namespace Gfx::DepthCamera
 InputDevice::~InputDevice()
 {
   disconnect();
+}
+
+void InputDevice::disconnect()
+{
+  // Before the base class, which clears the whole node tree: the settings tree
+  // holds raw pointers to the parameters that live in it.
+  if(auto* dev = static_cast<depthcam_device_impl*>(m_dev.get()))
+    dev->releaseControls();
+
+  GfxInputDevice::disconnect();
 }
 
 bool InputDevice::reconnect()
