@@ -38,6 +38,19 @@ g++ -std=c++20 -O1 -o /tmp/nettest Tests/abi/nettest.cpp \
 ## score/
 
 ```sh
+Tests/score/run.sh <build-dir> <suite> [timeout]
+Tests/score/run.sh ~/ossia/score/build-release reconnect
+```
+
+Use the runner rather than invoking score directly. score does **not** exit
+after evaluating a `--script`, so a plain `timeout N` burns the whole N every
+time -- forty minutes per suite under a sanitizer, for work that is over in
+two. The runner watches the report file for its last line and stops there. It
+also splits any sanitizer findings into ours and everyone else's.
+
+By hand, if you need to:
+
+```sh
 QT_ASSUME_STDERR_HAS_CONSOLE=1 \
   ossia-score --no-gui --script="$(cat Tests/score/reconnect_e2e.js)"
 ```
