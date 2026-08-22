@@ -272,6 +272,65 @@ std::string control_id_for(const std::string& raw_name, OBPermissionType perm)
   return "device/" + n;
 }
 
+/**
+ * @brief Names for the properties whose integer values are really an enum.
+ *
+ * The SDK reports these through getIntPropertyRange like any other number, so
+ * without this an IMU's output data rate shows up as "7" rather than "100 Hz"
+ * and there is no way to tell from the tree what the range even means. The
+ * values are what ObTypes.h assigns; anything the table does not cover keeps
+ * its number.
+ */
+struct NamedValue
+{
+  int value;
+  const char* label;
+};
+
+struct NamedProperty
+{
+  /// The control path, not the OBPropertyID: the ids for these live in an
+  /// internal header, while the name the SDK reports is public and is what the
+  /// path is derived from anyway.
+  const char* path;
+  const NamedValue* values;
+  int count;
+};
+
+constexpr NamedValue sample_rate_names[] = {
+    {1, "1.5625 Hz"}, {2, "3.125 Hz"}, {3, "6.25 Hz"},  {4, "12.5 Hz"},
+    {5, "25 Hz"},     {6, "50 Hz"},    {7, "100 Hz"},   {8, "200 Hz"},
+    {9, "500 Hz"},    {10, "1 kHz"},   {11, "2 kHz"},   {12, "4 kHz"},
+    {13, "8 kHz"},    {14, "16 kHz"},  {15, "32 kHz"},  {16, "400 Hz"},
+    {17, "800 Hz"},
+};
+
+constexpr NamedValue gyro_fs_names[] = {
+    {1, "16 dps"},   {2, "31 dps"},   {3, "62 dps"},  {4, "125 dps"},
+    {5, "250 dps"},  {6, "500 dps"},  {7, "1000 dps"},{8, "2000 dps"},
+    {9, "400 dps"},  {10, "800 dps"},
+};
+
+constexpr NamedValue accel_fs_names[] = {
+    {1, "2 g"},  {2, "4 g"},  {3, "8 g"},  {4, "16 g"},
+    {5, "3 g"},  {6, "6 g"},  {7, "12 g"}, {8, "24 g"},
+};
+
+constexpr NamedProperty named_properties[] = {
+    {"imu/gyro_odr", sample_rate_names, int(std::size(sample_rate_names))},
+    {"imu/accel_odr", sample_rate_names, int(std::size(sample_rate_names))},
+    {"imu/gyro_full_scale", gyro_fs_names, int(std::size(gyro_fs_names))},
+    {"imu/accel_full_scale", accel_fs_names, int(std::size(accel_fs_names))},
+};
+
+const NamedProperty* named_property_for(const std::string& path)
+{
+  for(const auto& n : named_properties)
+    if(path == n.path)
+      return &n;
+  return nullptr;
+}
+
 /// Cached descriptor plus everything needed to talk to the property again.
 struct ControlEntry
 {
@@ -279,6 +338,9 @@ struct ControlEntry
   OBPropertyType type{};
   std::string path;
   std::string name;
+  /// Labels for a named integer property, one per value in [min, max].
+  std::vector<std::string> labels;
+  std::vector<const char*> label_ptrs;
   depthcam_control desc{};
 };
 
@@ -531,6 +593,23 @@ void depthcam_device::scanControls()
           d.max = r.max;
           d.step = r.step > 0 ? r.step : 1;
           d.def = r.def;
+
+          // An integer whose values have names is an enum, whatever the SDK
+          // calls it. One label per value in [min, max], because that is how
+          // the ABI indexes them.
+          if(const auto* named = named_property_for(e.path);
+             named && r.max >= r.min && (r.max - r.min) < 64)
+          {
+            for(int v = r.min; v <= r.max; v++)
+            {
+              const char* label = nullptr;
+              for(int k = 0; k < named->count && !label; k++)
+                if(named->values[k].value == v)
+                  label = named->values[k].label;
+              e.labels.push_back(label ? label : std::to_string(v));
+            }
+            d.kind = DEPTHCAM_CONTROL_ENUM;
+          }
           break;
         }
         case OB_FLOAT_PROPERTY: {
@@ -559,9 +638,16 @@ void depthcam_device::scanControls()
   // stopped reallocating.
   for(auto& e : controls)
   {
+    e.label_ptrs.clear();
+    e.label_ptrs.reserve(e.labels.size());
+    for(const auto& l : e.labels)
+      e.label_ptrs.push_back(l.c_str());
+
     e.desc.id = e.path.c_str();
     e.desc.name = e.name.c_str();
     e.desc.description = nullptr;
+    e.desc.enum_labels = e.label_ptrs.empty() ? nullptr : e.label_ptrs.data();
+    e.desc.enum_count = int32_t(e.label_ptrs.size());
   }
 }
 

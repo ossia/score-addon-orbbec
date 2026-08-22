@@ -41,6 +41,11 @@ if(NOT TARGET ob::OrbbecSDK)
   set(OB_INSTALL_EXAMPLES_SOURCE OFF CACHE INTERNAL "")
   set(OB_BUILD_MAIN_PROJECT OFF CACHE INTERNAL "")
 
+  # The SDK is pinned third-party code compiled by whatever toolchain score is
+  # built with, which is regularly newer than the one its authors used. Every
+  # new diagnostic would otherwise be a build failure.
+  set(OB_WARNINGS_AS_ERRORS OFF CACHE INTERNAL "")
+
   block()
     # The SDK's own CMakeLists forces C++11 and a pile of -Wno-* at its directory
     # scope; SYSTEM keeps its headers from spamming our warning output.

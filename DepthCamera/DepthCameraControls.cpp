@@ -4,9 +4,12 @@
 #include <ossia/network/common/complex_type.hpp>
 #include <ossia/network/domain/domain.hpp>
 
+#include <ossia-qt/invoke.hpp>
+
 #include <QDebug>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace Gfx::DepthCamera
@@ -17,11 +20,11 @@ namespace
 /// How often observed read-only controls are re-read.
 ///
 /// Slow on purpose. Everything in this category is a temperature, a supply
-/// voltage or an accelerometer, none of which move fast, and each read is a USB
-/// control transfer competing with the video stream. A camera nobody is
-/// listening to costs nothing at all: the timer only runs while at least one
-/// control has an observer.
-constexpr int poll_interval_ms = 500;
+/// voltage or an accelerometer, none of which move fast, and each read is a
+/// transfer competing with the video stream -- a TCP round trip, for a camera
+/// on the network. A camera nobody is listening to costs nothing at all: the
+/// worker sleeps until something is observed.
+constexpr auto poll_interval = std::chrono::milliseconds{500};
 
 ossia::val_type type_for(const depthcam_control& c) noexcept
 {
@@ -168,6 +171,7 @@ ControlTree::ControlTree(
     return;
 
   m_entries.reserve(descs.size());
+  m_descs.reserve(descs.size());
 
   for(const auto& c : descs)
   {
@@ -190,30 +194,33 @@ ControlTree::ControlTree(
     if(auto d = description_for(c); !d.empty())
       ossia::net::set_description(*node, std::move(d));
 
-    Entry e;
-    e.id = c.id;
-    e.param = param;
-    e.kind = c.kind;
-    e.access = c.access;
+    auto e = std::make_unique<Entry>();
+    e->id = c.id;
+    e->param = param;
+    e->kind = c.kind;
+    e->access = c.access;
 
-    // Every parameter gets a value here, without exception. A parameter left
-    // holding ossia::value{} has no type at all, and anything that walks the
-    // whole tree -- deviceToJson, an OSCquery export, a preset save -- throws
+    // Only a control we cannot write is worth watching. Everything else we
+    // already know the value of, because we are the one who set it, and
+    // re-reading forty of those twice a second is a stream of transfers
+    // competing with the video for no information at all.
+    e->pollable = (c.access & DEPTHCAM_ACCESS_READ)
+                  && !(c.access & DEPTHCAM_ACCESS_WRITE)
+                  && c.kind != DEPTHCAM_CONTROL_ACTION;
+
+    // The backend's default, not the camera's current value.
+    //
+    // Reading every control here would be forty synchronous transfers inside
+    // reconnect() on the GUI thread -- perceptible over USB, seconds over
+    // Ethernet. The worker re-reads them all as its first job, so the real
+    // values arrive a moment later without anything having blocked.
+    //
+    // Every parameter gets *a* value, without exception: a parameter holding
+    // ossia::value{} has no type, and anything that walks the whole tree --
+    // deviceToJson, an OSCquery export, a preset save -- throws
     // "value_to_json_value: no type" on the first one it meets, which takes the
-    // application down. The default is also the sensible thing to show for a
-    // control the camera will not let us read.
-    double v = c.def;
-    if(c.kind != DEPTHCAM_CONTROL_ACTION && (c.access & DEPTHCAM_ACCESS_READ)
-       && m_backend.get_control)
-    {
-      std::lock_guard lk{m_lock};
-      double got{};
-      if(m_backend.get_control(&m_device, c.id, &got))
-        v = got;
-    }
-
-    // set_value_quiet, not push_value: publishing here would send the value
-    // straight back to the camera through the protocol.
+    // application down.
+    const double v = c.def;
     switch(type_for(c))
     {
       case ossia::val_type::IMPULSE:
@@ -236,26 +243,35 @@ ControlTree::ControlTree(
         break;
     }
 
-    if(c.kind != DEPTHCAM_CONTROL_ACTION)
-    {
-      e.last = v;
-      e.has_last = true;
-    }
-
     // Enum labels belong to the backend and stay valid until close, which is
     // after this object dies, so keeping the descriptor is safe.
     m_descs.push_back(c);
-    e.desc = int(m_descs.size()) - 1;
+    e->desc = int(m_descs.size()) - 1;
 
     m_entries.push_back(std::move(e));
   }
+
+  if(m_entries.empty())
+    return;
+
+  m_running.store(true, std::memory_order_release);
+  m_worker = std::thread{[this] { run(); }};
+
+  // First job: the values the constructor did not wait for.
+  refresh();
 }
 
 ControlTree::~ControlTree()
 {
-  // Just the timer, which reads through m_backend at a device that is closed as
-  // soon as this returns.
-  //
+  // The worker first, and joined, not just signalled: it reads through
+  // m_backend at a device that is closed as soon as this returns.
+  if(m_running.exchange(false, std::memory_order_acq_rel))
+  {
+    wake();
+    if(m_worker.joinable())
+      m_worker.join();
+  }
+
   // Deliberately *not* callbacks_clear() on the parameters, unlike the V4L2
   // control tree this is modelled on: nothing here ever installs a callback.
   // Writes arrive through depthcam_protocol::push, which the device clears
@@ -263,29 +279,146 @@ ControlTree::~ControlTree()
   // anyway -- Device::DeviceInterface::disconnect() calls
   // root.clear_children() on the way down, so by the time this runs on a
   // reconnect or a device removal they are already gone.
-  m_timer.reset();
+  //
+  // Anything the worker posted to m_context and that has not run yet dies with
+  // it: ~QObject drops a QObject's undelivered events.
+}
+
+int ControlTree::indexOf(const ossia::net::parameter_base& param) noexcept
+{
+  for(std::size_t i = 0; i < m_entries.size(); i++)
+    if(m_entries[i]->param == &param)
+      return int(i);
+  return -1;
 }
 
 ControlTree::Entry* ControlTree::find(const ossia::net::parameter_base& param) noexcept
 {
-  for(auto& e : m_entries)
-    if(e.param == &param)
-      return &e;
-  return nullptr;
+  const int i = indexOf(param);
+  return i >= 0 ? m_entries[std::size_t(i)].get() : nullptr;
+}
+
+void ControlTree::post(Request r)
+{
+  {
+    std::lock_guard lk{m_queue_lock};
+    if(!m_running.load(std::memory_order_acquire))
+      return;
+
+    // Collapse repeats. An automation curve writing at audio rate would
+    // otherwise pile up thousands of requests the camera can never keep up
+    // with, and only the last one was ever going to matter.
+    for(auto& p : m_pending)
+    {
+      if(p.entry == r.entry && p.is_write == r.is_write)
+      {
+        p.value = r.value;
+        return;
+      }
+    }
+    m_pending.push_back(r);
+  }
+  m_queue_cv.notify_one();
+}
+
+void ControlTree::wake()
+{
+  std::lock_guard lk{m_queue_lock};
+  m_queue_cv.notify_one();
+}
+
+void ControlTree::run()
+{
+  std::vector<Request> batch;
+  std::vector<std::pair<int, double>> results;
+
+  while(m_running.load(std::memory_order_acquire))
+  {
+    {
+      std::unique_lock lk{m_queue_lock};
+      if(m_pending.empty())
+      {
+        // Sleep until there is something to do. With nothing observed there is
+        // no timeout at all, so an idle camera is not touched.
+        if(m_polled.load(std::memory_order_relaxed) > 0)
+          m_queue_cv.wait_for(lk, poll_interval);
+        else
+          m_queue_cv.wait(lk);
+      }
+      batch.swap(m_pending);
+      m_pending.clear();
+    }
+
+    if(!m_running.load(std::memory_order_acquire))
+      break;
+
+    results.clear();
+
+    for(const auto& r : batch)
+    {
+      auto& e = *m_entries[std::size_t(r.entry)];
+      if(r.is_write)
+      {
+        if(m_backend.set_control)
+          m_backend.set_control(&m_device, e.id.c_str(), r.value);
+
+        // Read back what the camera settled on rather than trusting the write:
+        // ranges are quantised (an Orbbec white balance snaps to 100K steps)
+        // and some settings are refused outright while an `auto` is on.
+        double got{};
+        if((e.access & DEPTHCAM_ACCESS_READ) && m_backend.get_control
+           && m_backend.get_control(&m_device, e.id.c_str(), &got))
+          results.emplace_back(r.entry, got);
+      }
+      else if((e.access & DEPTHCAM_ACCESS_READ) && m_backend.get_control)
+      {
+        double got{};
+        if(m_backend.get_control(&m_device, e.id.c_str(), &got))
+          results.emplace_back(r.entry, got);
+      }
+    }
+    batch.clear();
+
+    // Then the sensors anything is listening to.
+    if(m_polled.load(std::memory_order_relaxed) > 0 && m_backend.get_control)
+    {
+      for(std::size_t i = 0; i < m_entries.size(); i++)
+      {
+        auto& e = *m_entries[i];
+        if(!e.pollable || e.observers.load(std::memory_order_relaxed) <= 0)
+          continue;
+        double got{};
+        if(m_backend.get_control(&m_device, e.id.c_str(), &got))
+          results.emplace_back(int(i), got);
+      }
+    }
+
+    if(results.empty())
+      continue;
+
+    // Published from the Qt thread: this runs the parameters' callbacks, which
+    // reach the explorer, the execution engine and anything listening over OSC.
+    ossia::qt::run_async(&m_context, [this, values = results] {
+      for(auto& [idx, v] : values)
+        publish(*m_entries[std::size_t(idx)], v);
+    });
+  }
 }
 
 bool ControlTree::write(const ossia::net::parameter_base& param, const ossia::value& v)
 {
-  auto* e = find(param);
-  if(!e)
-    return false;
-  if(!(e->access & DEPTHCAM_ACCESS_WRITE) || !m_backend.set_control)
+  const int idx = indexOf(param);
+  if(idx < 0)
     return false;
 
-  const auto& c = m_descs[std::size_t(e->desc)];
+  auto& e = *m_entries[std::size_t(idx)];
+  if(!(e.access & DEPTHCAM_ACCESS_WRITE) || !m_backend.set_control)
+    return false;
+
+  const auto& c = m_descs[std::size_t(e.desc)];
 
   double raw{};
-  switch(e->kind)
+  switch(e.kind)
   {
     case DEPTHCAM_CONTROL_ACTION:
       // No payload: any write fires it.
@@ -323,35 +456,33 @@ bool ControlTree::write(const ossia::net::parameter_base& param, const ossia::va
       break;
   }
 
-  std::lock_guard lk{m_lock};
-  if(!m_backend.set_control(&m_device, e->id.c_str(), raw))
-    return false;
+  // Queued, not sent. This is called from the GUI thread, from the execution
+  // engine and from whichever thread an OSC message arrived on, and a write is
+  // a synchronous transfer to the camera.
+  post({.entry = idx, .value = raw, .is_write = true});
 
-  // Deliberately not read back and corrected here: this runs inside the
-  // parameter's own callback, and callback_container::send holds a
-  // non-recursive mutex across it, so pushing the corrected value would
-  // deadlock whichever thread wrote -- the GUI included. A camera that clamped
-  // or rounded shows up on the next poll instead.
-  e->last = raw;
-  e->has_last = true;
+  // The tree now shows what was asked for. If the camera clamps or rounds it,
+  // the worker's read-back corrects it -- which cannot be done here, because
+  // this runs inside the parameter's own callback and callback_container::send
+  // holds a non-recursive mutex across it.
+  e.last = raw;
+  e.has_last = true;
   return true;
 }
 
 bool ControlTree::read(ossia::net::parameter_base& param)
 {
-  auto* e = find(param);
-  if(!e)
-    return false;
-  if(!(e->access & DEPTHCAM_ACCESS_READ) || !m_backend.get_control)
+  const int idx = indexOf(param);
+  if(idx < 0)
     return false;
 
-  double v{};
-  {
-    std::lock_guard lk{m_lock};
-    if(!m_backend.get_control(&m_device, e->id.c_str(), &v))
-      return false;
-  }
-  publish(*e, v);
+  auto& e = *m_entries[std::size_t(idx)];
+  if(!(e.access & DEPTHCAM_ACCESS_READ) || !m_backend.get_control)
+    return false;
+
+  // The parameter already holds the last known value, so a pull has nothing to
+  // wait for; this only asks for a fresher one.
+  post({.entry = idx, .is_write = false});
   return true;
 }
 
@@ -396,75 +527,33 @@ bool ControlTree::observe(const ossia::net::parameter_base& param, bool enable)
   auto* e = find(param);
   if(!e)
     return false;
+  if(!e->pollable)
+    return true; // ours, but nothing to watch for
 
-  e->observers = std::max(0, e->observers + (enable ? 1 : -1));
-  updateTimer();
+  const int before = e->observers.load(std::memory_order_relaxed);
+  const int after = std::max(0, before + (enable ? 1 : -1));
+  e->observers.store(after, std::memory_order_relaxed);
+
+  if(before == 0 && after > 0)
+  {
+    if(m_polled.fetch_add(1, std::memory_order_relaxed) == 0)
+      wake();
+  }
+  else if(before > 0 && after == 0)
+  {
+    m_polled.fetch_sub(1, std::memory_order_relaxed);
+  }
   return true;
-}
-
-void ControlTree::updateTimer()
-{
-  const bool wanted = std::any_of(m_entries.begin(), m_entries.end(), [](const Entry& e) {
-    return e.observers > 0 && (e.access & DEPTHCAM_ACCESS_READ)
-           && e.kind != DEPTHCAM_CONTROL_ACTION;
-  });
-
-  if(!wanted)
-  {
-    m_timer.reset();
-    return;
-  }
-  if(m_timer)
-    return;
-  if(!m_backend.get_control)
-    return;
-
-  m_timer = std::make_unique<QTimer>(&m_context);
-  QObject::connect(m_timer.get(), &QTimer::timeout, &m_context, [this] { poll(); });
-  m_timer->start(poll_interval_ms);
-}
-
-void ControlTree::poll()
-{
-  // Read everything under the lock, publish outside it: publishing runs the
-  // parameters' callbacks, which can come straight back here to write.
-  std::vector<std::pair<Entry*, double>> got;
-  {
-    std::lock_guard lk{m_lock};
-    for(auto& e : m_entries)
-    {
-      if(e.observers <= 0 || !(e.access & DEPTHCAM_ACCESS_READ)
-         || e.kind == DEPTHCAM_CONTROL_ACTION)
-        continue;
-      double v{};
-      if(m_backend.get_control(&m_device, e.id.c_str(), &v))
-        got.emplace_back(&e, v);
-    }
-  }
-
-  for(auto& [e, v] : got)
-    publish(*e, v);
 }
 
 void ControlTree::refresh()
 {
-  std::vector<std::pair<Entry*, double>> got;
+  for(std::size_t i = 0; i < m_entries.size(); i++)
   {
-    std::lock_guard lk{m_lock};
-    if(!m_backend.get_control)
-      return;
-    for(auto& e : m_entries)
-    {
-      if(!(e.access & DEPTHCAM_ACCESS_READ) || e.kind == DEPTHCAM_CONTROL_ACTION)
-        continue;
-      double v{};
-      if(m_backend.get_control(&m_device, e.id.c_str(), &v))
-        got.emplace_back(&e, v);
-    }
+    const auto& e = *m_entries[i];
+    if((e.access & DEPTHCAM_ACCESS_READ) && e.kind != DEPTHCAM_CONTROL_ACTION)
+      post({.entry = int(i), .is_write = false});
   }
-
-  for(auto& [e, v] : got)
-    publish(*e, v);
 }
 
 }
