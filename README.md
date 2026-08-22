@@ -24,12 +24,38 @@ Orbbec Femto Mega also works over Ethernet — see [Connecting by address](#conn
 ## Installing
 
 The plug-in itself contains no camera SDK, so it is always present and costs
-nothing if you have no camera. Support for each camera family arrives as a
-separate **backend package** you install from score's package manager. Install
-only the ones you need.
+nothing if you have no camera. The SDKs arrive as one **Depth cameras** package
+you install from score's package manager. It lands in:
 
-After installing a backend, **install its udev rules** (Linux only, see below)
-and restart score.
+```
+~/Documents/ossia/score/packages/depth-camera/
+```
+
+and contains one self-contained shared object per camera family, plus the
+auxiliary files two of the SDKs load at runtime:
+
+```
+depth-camera/
+  package.json
+  score_depthcam_orbbec.so        Femto, Gemini, Astra   (USB and Ethernet)
+  score_depthcam_freenect.so      Kinect v1
+  score_depthcam_freenect2.so     Kinect v2
+  score_depthcam_k4a.so           Azure Kinect DK
+  score_depthcam_realsense.so     Intel RealSense
+  extensions/                     OrbbecSDK runtime blobs, loaded by path
+  udev/                           the Linux rules, see below
+```
+
+The whole thing is about 8 MB. One package rather than one per SDK: the
+backends are small, three of them need files sitting next to them, and plugging
+in a camera should not require working out which of five downloads yours is in.
+
+After installing, **install the udev rules** (Linux only, see below) and restart
+score.
+
+Nothing else has to be set up — no `LD_LIBRARY_PATH`, no rpath. Each backend is
+a single file with no dependency on any SDK beside it, and it is given its own
+directory to find `extensions/` in.
 
 ### Linux: udev rules are not optional
 
@@ -37,11 +63,11 @@ Every one of these SDKs talks to the camera over raw USB. Without the matching
 udev rules the device nodes stay root-owned, the SDK reports *no cameras*, and
 the symptom is indistinguishable from nothing being plugged in.
 
-Each backend package ships the rules for its own hardware in a `udev/`
+The package ships the rules for all the supported hardware in its `udev/`
 subdirectory:
 
 ```sh
-sudo cp <backend-package>/udev/*.rules /etc/udev/rules.d/
+sudo cp ~/Documents/ossia/score/packages/depth-camera/udev/*.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
@@ -75,7 +101,18 @@ runtime, in this order:
 
 So you can either install the [Azure Kinect Sensor
 SDK](https://github.com/microsoft/Azure-Kinect-Sensor-SDK) system-wide, or drop
-`libk4a.so.1.4` and `libdepthengine.so.2.0` into the backend's package folder.
+it into the package folder yourself:
+
+```
+depth-camera/
+  libk4a.so.1.4
+  libk4a1.4/
+    libdepthengine.so.2.0
+```
+
+The subdirectory is not a suggestion: libk4a's own `RUNPATH` is
+`$ORIGIN/libk4a1.4`, so that is the only place it looks for the depth engine.
+Put the engine flat next to libk4a and the camera opens but produces no depth.
 
 If it is missing, score's log says so explicitly rather than leaving the camera
 mysteriously absent:
@@ -125,12 +162,54 @@ The device exposes one child node per enabled stream:
 Point-cloud positions are in **metres**, right-handed, +X right / +Y down /
 +Z forward. Colours, where present, are normalised to 0–1.
 
+### Orbbec cameras over Ethernet
+
+A Femto Mega with an Ethernet port shows up in the browser like any other
+camera, alongside the USB ones, with `Ethernet` as its transport. There is
+nothing to configure: the SDK broadcasts a GVCP discovery request on every
+interface and lists whatever answers.
+
+**If no network camera appears, suspect your firewall before the camera.** The
+cameras reply to `255.255.255.255`, not to the host that asked — the firmware
+ignores the GigE Vision "unicast acknowledge" flag — so the answer arrives as a
+broadcast datagram, and a host firewall that drops broadcast input hides every
+networked camera on the segment while they are all answering perfectly well.
+
+`ufw` does exactly that out of the box; its `ufw-after-input` chain sends
+anything with a broadcast destination straight to the default DROP policy. Since
+the reply's *destination* port is ephemeral, the rule has to match the *source*
+port:
+
+```sh
+sudo ufw allow proto udp from 192.168.0.0/24 port 3956 comment 'Orbbec GVCP discovery'
+```
+
+with `firewalld`:
+
+```sh
+sudo firewall-cmd --permanent --add-rich-rule='rule family=ipv4 source address=192.168.0.0/24 port port=3956 protocol=udp accept'
+sudo firewall-cmd --reload
+```
+
+To check whether the cameras are answering at all, independently of score:
+
+```sh
+sudo tcpdump -ni any 'udp port 3956'
+```
+
+Each camera should send one 256-byte reply per discovery request. If you see the
+replies here but no camera in score, it is the firewall.
+
+Discovery is a broadcast, so it also never crosses a router: a camera on another
+subnet has to be addressed directly. Tick **Connect over the network** in the
+device dialog and type its host and port (8090 unless you changed it). That path
+is a plain TCP connection and is unaffected by any of the above.
+
 ### Connecting by address
 
 The **Camera** field is editable. Picking a camera from the browser fills it in,
 but typing one by hand is the same code path — which is how you reach a camera
-that is not currently being discovered, most importantly a Femto Mega on the
-network:
+that is not currently being discovered:
 
 ```
 orbbec:sn:CL8L1234ABC          match by serial number
@@ -139,6 +218,7 @@ orbbec:net:192.168.0.12        Femto Mega over Ethernet, default port 8090
 orbbec:net:192.168.0.12:8090   explicit port
 freenect2:sn:012345678901      Kinect v2
 freenect:index:0               Kinect v1
+freenect:index:0?motor=1       Kinect v1, claiming the tilt motor as well
 k4a:sn:000123456789            Azure Kinect
 realsense:sn:040322070203      RealSense
 ```
@@ -148,6 +228,59 @@ Leave it empty to take the first camera any backend reports.
 If a named camera is not present the device fails to connect rather than falling
 back to a different one: silently streaming from the wrong camera is worse than
 not connecting.
+
+### Camera settings
+
+Whatever the camera's SDK will let you change appears under a `controls` node,
+grouped by what it affects:
+
+```
+cam:/controls/color/exposure
+cam:/controls/color/auto_exposure
+cam:/controls/depth/laser_power
+cam:/controls/imu/gyro_sensitivity
+cam:/controls/sensors/temperature
+cam:/controls/advanced/reboot_device
+```
+
+These are ordinary ossia parameters: automate them, drive them from OSC, read
+them back. Each carries its real type, range and access mode, so a slider knows
+its bounds and a read-only sensor is not offered as writable.
+
+Nothing about the list is hard-coded. Orbbec and librealsense enumerate their
+settings at runtime, so a camera that did not exist when this was written still
+comes out organised; k4a and the two libfreenect backends have fixed lists but
+ask the device what it supports. Roughly what to expect:
+
+| Camera | Controls |
+|---|---|
+| Orbbec Femto Mega | 39 — colour, depth, laser, IMU, fan, sync, sensors |
+| Intel RealSense D435i | 43 — per sensor: stereo module, RGB, IMU |
+| Azure Kinect DK | 12 — the colour controls, plus sensor temperature |
+| Kinect v2 | 5 — the three exposure modes and their parameters |
+| Kinect v1 | 6 — tilt, LED, accelerometer (see below) |
+
+Two groups are worth calling out:
+
+- **`sensors/`** holds read-only values: temperatures, accelerometers, the
+  exposure an automatic mode settled on. No SDK here reports a change, so these
+  are polled — but only while something is listening to them. A control nobody
+  is watching costs nothing.
+- **`advanced/`** holds triggers with no readable value: rebooting the camera,
+  entering recovery mode. They are grouped away deliberately so they are not one
+  click from a performer mid-performance.
+
+Writes go straight to the camera. A camera that clamps or rounds a value, or
+refuses it outright (an exposure while auto-exposure is on, a fan speed the
+firmware rejects), is reflected on the next read rather than silently accepted.
+
+**Kinect v1 tilt and LED** are opt-in: append `?motor=1` to the address. The
+motor is a separate USB interface, and on the original model 1414 claiming it
+costs nothing — but on a model 1473 or a Kinect for Windows libfreenect drives
+the motor through the *audio* interface, which needs a firmware upload this
+build does not ship. Asking for it there fails the open outright and resets the
+camera for several seconds. A camera that streams is worth more than a tilt
+motor, so nothing is risked unless you ask.
 
 ### Alignment, and why it decides your frame rate
 
@@ -198,6 +331,16 @@ identical from the outside.
 | Everything very slow, RealSense | Plugged into USB 2 |
 | Coloured point cloud is white | Fixed; if you see it again, report the camera model |
 | `Colored point cloud` greyed out | Alignment is set to None |
+| No **Ethernet** Orbbec cameras, USB ones fine | A host firewall dropping broadcast input — see [Orbbec cameras over Ethernet](#orbbec-cameras-over-ethernet) |
+| Kinect v1 opens once, then "is not connected" | A model 1473 reports a different serial each time it is listed; fixed, but an address saved by an older build may need re-picking from the browser |
+| No `controls` node | That backend has nothing to offer for this camera, or (Kinect v1) the motor was not requested |
+
+In a Release build score's own diagnostics go to stderr, which is not attached
+to a console by default on any platform. To see them:
+
+```sh
+QT_ASSUME_STDERR_HAS_CONSOLE=1 ossia-score
+```
 
 ## Building from source
 
@@ -214,7 +357,23 @@ Backends build only when their submodule is present, and each can be turned off:
 -DSCORE_DEPTHCAM_BUILD_FREENECT2=OFF
 -DSCORE_DEPTHCAM_BUILD_REALSENSE=OFF
 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON    # Kinect v2 GPU depth pipeline, on by default
+-DSCORE_DEPTHCAM_ORBBEC_STATIC=ON       # build the OrbbecSDK into the backend
 ```
+
+To produce the distributable package:
+
+```sh
+cmake --build . --target depthcam-package
+```
+
+which stages, strips and zips `<build>/depth-camera/` into
+`depth-camera-<arch>.zip`, named the way `score::addonArchitecture()` spells it
+(`linux-x86_64`, `darwin-aarch64`, `windows-x86_64`) — that is the key score's
+package manager looks up in the remote manifest. Stripping is not cosmetic: with
+the SDK built in, the Orbbec backend is 139 MB unstripped and 9 MB stripped.
+
+`<build>/depth-camera/` *is* the package layout, so anything that works in the
+build tree works installed.
 
 The Kinect v2's depth decode is by far the slowest part of that camera. With the
 CPU pipeline it delivers about 1.6fps; with OpenCL it reaches 30fps, the sensor's
@@ -234,8 +393,11 @@ library. With default ELF visibility the first definition loaded wins for every
 caller, so two SDKs sharing a process silently bind to one another's copies —
 and libjpeg in particular bakes struct sizes into its callers, so a mismatch
 corrupts memory rather than failing to link. Each backend therefore hides
-everything it links (`-fvisibility=hidden` plus `--exclude-libs,ALL`) and is
-verified to export a single symbol.
+everything it links (`-fvisibility=hidden` plus `--exclude-libs,ALL` plus a
+linker version script) and exports exactly one symbol. CI fails the build if any
+backend exports more than one, because that guarantee is what the whole design
+rests on: score `dlopen`s the contents of its package directories, on Linux with
+`RTLD_GLOBAL`.
 
 Writing a backend for another camera means implementing one header. Nothing on
 the score side is camera-specific.
@@ -249,6 +411,7 @@ are not:
 |---|---|---|
 | OrbbecSDK v2 | MIT | yes |
 | OrbbecSDK `extensions/` blobs | Orbbec proprietary | **check before shipping** |
+| `extensions/depthengine` (Femto Bolt) | Microsoft, redistributed by Orbbec | as the OrbbecSDK does |
 | libfreenect / libfreenect2 | Apache-2.0 / GPLv2 dual | yes |
 | librealsense | Apache-2.0 | yes |
 | Azure Kinect Sensor SDK | MIT | yes |

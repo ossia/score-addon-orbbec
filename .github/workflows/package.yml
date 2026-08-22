@@ -1,0 +1,137 @@
+# Builds the depth-camera package: one archive per architecture, containing
+# every camera backend.
+#
+# Separate from builds.yaml, which checks that the add-on compiles. This one
+# produces the artefact users actually download, so it is a Release build, it
+# strips, and on a tag it uploads.
+#
+# fail-fast is off on purpose. The five SDKs do not all support the three
+# platforms -- libk4a has no macOS build at all, and libfreenect2 needs
+# libusb from the system -- so a platform failing must not take the others
+# down with it.
+
+name: Package
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  package:
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {
+              name: "Linux (x86_64)",
+              os: ubuntu-latest,
+              arch: "linux-x86_64",
+              path: "/opt/ossia-sdk/llvm/bin",
+              flags: "-DCMAKE_C_COMPILER=/opt/ossia-sdk/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/ossia-sdk/llvm/bin/clang++",
+              dependencies: "sudo apt update && sudo apt install -y libgl-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-*-dev libX11-*-dev libz-dev libxext-dev libusb-1.0-0-dev libturbojpeg0-dev ocl-icd-opencl-dev",
+              sdk: "/opt/ossia-sdk",
+            }
+          - {
+              name: "macOS (arm64)",
+              os: macos-latest,
+              arch: "darwin-aarch64",
+              flags: "",
+              dependencies: "brew install libusb jpeg-turbo",
+              sdk: "/opt/ossia-sdk-aarch64",
+            }
+          - {
+              name: "Windows (x86_64)",
+              os: windows-latest,
+              arch: "windows-x86_64",
+              path: "/c/ossia-sdk/llvm/bin",
+              flags: "-GNinja -DCMAKE_C_COMPILER=c:/ossia-sdk/llvm/bin/clang.exe -DCMAKE_CXX_COMPILER=c:/ossia-sdk/llvm/bin/clang++.exe",
+              dependencies: "cinst ninja",
+              sdk: "/c/ossia-sdk",
+            }
+
+    steps:
+      - name: Checkout add-on
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          path: addon
+
+      - name: Checkout score
+        uses: actions/checkout@v4
+        with:
+          repository: ossia/score
+          submodules: "recursive"
+          path: score
+
+      - name: Install dependencies
+        shell: bash
+        run: ${{ matrix.config.dependencies }}
+
+      - name: Download SDK
+        shell: bash
+        run: cd score && tools/fetch-sdk.sh
+
+      - name: Build the backends
+        shell: bash
+        run: |
+          if [[ "${{ matrix.config.path }}" != "" ]]; then
+            export PATH=${{ matrix.config.path }}:$PATH
+          fi
+
+          cmake -S addon -B build \
+            -DSCORE_SOURCE_DIR=$PWD/score \
+            -DOSSIA_SDK=${{ matrix.config.sdk }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            ${{ matrix.config.flags }}
+
+          # Backends only. The plug-in itself is statically linked into score
+          # and is not part of this artefact.
+          cmake --build build --target \
+            score_depthcam_orbbec \
+            score_depthcam_k4a \
+            score_depthcam_freenect \
+            score_depthcam_freenect2 \
+            score_depthcam_realsense
+
+          cmake --build build --target depthcam-package
+
+      - name: Check the exported symbols
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # The whole design rests on this: score dlopens everything in its
+          # support and package directories, on Linux with RTLD_GLOBAL, so a
+          # backend that exports anything beyond its entry point can interpose
+          # a sibling's libusb or libjpeg. Five SDKs, five private copies.
+          fail=0
+          for so in build/depth-camera/score_depthcam_*.so; do
+            n=$(nm -D --defined-only "$so" | wc -l)
+            echo "$so exports $n symbol(s)"
+            if [ "$n" -ne 1 ]; then
+              echo "::error::$so exports $n symbols, expected exactly 1"
+              nm -D --defined-only "$so" | head -20
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: depth-camera-${{ matrix.config.arch }}
+          path: build/depth-camera-${{ matrix.config.arch }}.zip
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags')
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: build/depth-camera-${{ matrix.config.arch }}.zip
+          tag: ${{ github.ref }}
+          overwrite: true

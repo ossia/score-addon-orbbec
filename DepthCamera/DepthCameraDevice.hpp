@@ -7,6 +7,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QSpinBox;
@@ -49,10 +50,23 @@ public:
 private:
   void updateEnabledState();
 
+  /// The address the dialog will hand back: either what was typed, or the one
+  /// composed from the network fields.
+  QString currentAddress() const;
+
   Device::DeviceSettings m_settings;
 
   QLineEdit* m_deviceNameEdit{};
   QLineEdit* m_address{};
+
+  /// Orbbec cameras with an Ethernet port answer a broadcast, but a host
+  /// firewall that drops broadcast input hides every one of them, and a camera
+  /// on another subnet is never going to be discovered at all. Typing the
+  /// address has to be a first-class way in, not a URI the user has to know the
+  /// syntax of.
+  QGroupBox* m_network{};
+  QLineEdit* m_networkHost{};
+  QSpinBox* m_networkPort{};
 
   QCheckBox* m_rgb{};
   QCheckBox* m_ir{};

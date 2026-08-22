@@ -311,6 +311,49 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
   checkForChanges(m_address);
   layout->addRow(tr("Camera"), m_address);
 
+  // A network camera by address, without having to know the URI syntax.
+  //
+  // Discovery is a GVCP broadcast, and the reply comes back addressed to
+  // 255.255.255.255 -- the firmware ignores the "unicast acknowledge" flag -- so
+  // any host firewall that drops broadcast input hides every networked camera on
+  // the segment while the cameras themselves are answering perfectly well. ufw
+  // does exactly that by default. A camera on another subnet is out of reach of
+  // a broadcast regardless. Either way, typing the address is the way in.
+  m_network = new QGroupBox{tr("Connect over the network"), this};
+  m_network->setCheckable(true);
+  m_network->setChecked(false);
+  {
+    auto net_layout = new QFormLayout{m_network};
+    m_networkHost = new QLineEdit{this};
+    m_networkHost->setPlaceholderText(tr("192.168.0.12"));
+    net_layout->addRow(tr("Host"), m_networkHost);
+
+    m_networkPort = new QSpinBox{this};
+    m_networkPort->setRange(1, 65535);
+    m_networkPort->setValue(8090);
+    net_layout->addRow(tr("Port"), m_networkPort);
+
+    auto note = new QLabel{
+        tr("Orbbec only (Femto Mega). The camera also has to be reachable: "
+           "automatic discovery needs UDP broadcast to arrive, which a host "
+           "firewall usually blocks."),
+        this};
+    note->setWordWrap(true);
+    net_layout->addRow(note);
+  }
+  // No checkForChanges overload for a QGroupBox; the signal is the same.
+  connect(
+      m_network, &QGroupBox::toggled, this, &Device::ProtocolSettingsWidget::changed);
+  checkForChanges(m_networkHost);
+  checkForChanges(m_networkPort);
+  layout->addRow(m_network);
+
+  connect(m_network, &QGroupBox::toggled, this, [this] { updateEnabledState(); });
+  connect(
+      m_networkHost, &QLineEdit::textChanged, this, [this] { updateEnabledState(); });
+  connect(
+      m_networkPort, &QSpinBox::valueChanged, this, [this] { updateEnabledState(); });
+
   // Say so rather than presenting an empty browser and letting the user wonder.
   if(BackendRegistry::instance().backends().empty())
   {
@@ -382,8 +425,33 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
   setSettings(InputFactory{}.defaultSettings());
 }
 
+QString InputSettingsWidget::currentAddress() const
+{
+  if(!m_network->isChecked())
+    return m_address->text();
+
+  const auto host = m_networkHost->text().trimmed();
+  if(host.isEmpty())
+    return {};
+
+  // The backend takes an IPv6 literal in brackets, so a raw one has to be
+  // wrapped before the port is appended -- otherwise the last colon of the
+  // address reads as the port separator.
+  const auto quoted
+      = host.contains(':') && !host.startsWith('[') ? "[" + host + "]" : host;
+  return QStringLiteral("orbbec:net:%1:%2").arg(quoted).arg(m_networkPort->value());
+}
+
 void InputSettingsWidget::updateEnabledState()
 {
+  // One source of truth: with the network group on, the address is composed
+  // from it, so showing the result read-only is clearer than leaving a second
+  // editable copy that silently loses.
+  const bool net = m_network->isChecked();
+  m_address->setReadOnly(net);
+  if(net)
+    m_address->setText(currentAddress());
+
   const bool aligned
       = m_align->currentData().toInt() != int(DepthCameraSettings::AlignMode::None);
   // A coloured cloud needs depth and colour in one frame of reference; without
@@ -405,7 +473,7 @@ Device::DeviceSettings InputSettingsWidget::getSettings() const
   s.protocol = InputFactory::static_concreteKey();
 
   DepthCameraSettings set;
-  set.device = m_address->text();
+  set.device = currentAddress();
   set.rgb = m_rgb->isChecked();
   set.ir = m_ir->isChecked();
   set.depth = m_depth->isChecked();
@@ -431,6 +499,43 @@ void InputSettingsWidget::setSettings(const Device::DeviceSettings& settings)
 
   const auto set = settings.deviceSpecificSettings.value<DepthCameraSettings>();
   m_address->setText(set.device);
+
+  // Split a network address back into the fields it came from, so an existing
+  // device opens the dialog looking the way it was set up rather than as a URI.
+  m_network->setChecked(false);
+  if(static const QString prefix{"orbbec:net:"}; set.device.startsWith(prefix))
+  {
+    auto rest = set.device.mid(prefix.size());
+    QString host = rest;
+    int port = 8090;
+
+    if(rest.startsWith('['))
+    {
+      // "[::1]:8090"
+      if(const auto close = rest.indexOf(']'); close > 0)
+      {
+        host = rest.mid(1, close - 1);
+        if(const auto colon = rest.indexOf(':', close); colon > 0)
+          port = rest.mid(colon + 1).toInt();
+      }
+    }
+    else if(const auto colon = rest.lastIndexOf(':'); colon > 0)
+    {
+      bool ok = false;
+      if(const int p = rest.mid(colon + 1).toInt(&ok); ok && p > 0 && p <= 65535)
+      {
+        host = rest.left(colon);
+        port = p;
+      }
+    }
+
+    if(!host.isEmpty())
+    {
+      m_network->setChecked(true);
+      m_networkHost->setText(host);
+      m_networkPort->setValue(port);
+    }
+  }
   m_rgb->setChecked(set.rgb);
   m_ir->setChecked(set.ir);
   m_depth->setChecked(set.depth);
