@@ -93,7 +93,34 @@ ones, and 2.9.3 logs `Device Component 'frame processor factory' not found`
 against them. They are copied from the SDK tree, so a clean build picks up the
 right ones; it needs confirming rather than assuming.
 
-## Recommendation
+## Done
+
+Taken, at `77005bbe` on the fork's `rebased-2.9.3` branch. Three things the
+move needed that were not in the rebased patch, all on our side:
+
+- `setExtensionsDirectory` is given `<package>/extensions`, not `<package>`.
+  2.5 appended the subdirectory itself; 2.9 takes the path literally, and the
+  only symptom of getting it wrong is a Femto Mega producing no point cloud —
+  the SDK logs a warning and swallows the failure.
+- The console log is set to errors only unless `SCORE_DEPTHCAM_DEBUG` is set,
+  and the log *file* is turned off. With logging working again the SDK is
+  chatty — opening a Femto Mega prints a dozen "recoverable exception"
+  warnings from component probes that are entirely normal — and it writes
+  `Log/OrbbecSDK.log.txt` into whatever directory score was launched from.
+- `setLoggerToFile` takes `""`, not `nullptr`: it builds a `std::string` from
+  the argument before looking at the severity.
+
+One known limitation, unchanged by the upgrade but newly *visible* now that
+the SDK logs: `extensions/frameprocessor/libob_frame_processor.so` links
+`libOrbbecSDK.so.2`, which does not exist beside it because the SDK is
+compiled into the backend. It therefore never loads, and the SDK reports
+`Device Component 'frame processor factory' not found`. Everything works
+without it — colour, depth, IR, point clouds, alignment, controls and the IMU
+are all verified — because it is the SDK's optional device-side frame
+post-processing. Loading it would mean shipping the 72MB shared library
+alongside, which is the whole thing the static build exists to avoid.
+
+## Recommendation as it stood
 
 Take it, but as its own change with its own testing pass. The gain is real —
 four minor versions of device support and bug fixes, a smaller patch, and the
