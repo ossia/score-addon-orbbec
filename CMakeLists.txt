@@ -155,6 +155,22 @@ if(NOT TARGET ob::OrbbecSDK)
       target_link_options(OrbbecSDK PRIVATE "LINKER:-z,noexecstack")
     endif()
   endif()
+
+  # Windows on ARM: the alignment and undistortion filters are written against
+  # the SSE intrinsics and reach NEON through the SSE2NEON.h the SDK bundles.
+  # They pick it on `__ARM_NEON__ || __aarch64__ || __arm__` -- all of them gcc
+  # and clang spellings, none of which MSVC defines -- so an ARM64 MSVC build
+  # instead takes the x86 branch and dies in the toolchain's own header:
+  # "xmmintrin.h(27): fatal error C1189: This header is specific to X86, X64,
+  # ARM64, and ARM64EC targets". The SDK's windows_config.cmake defining
+  # -D__SSSE3__ for every MSVC target is what gets it that far.
+  #
+  # SSE2NEON.h does support _M_ARM64; it just insists on the conforming
+  # preprocessor, which MSVC still does not use by default.
+  if(MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$" AND TARGET filter)
+    target_compile_definitions(filter PRIVATE __ARM_NEON__)
+    target_compile_options(filter PRIVATE /Zc:preprocessor)
+  endif()
 endif()
 
 ### --- The depth-camera package ----------------------------------------------
