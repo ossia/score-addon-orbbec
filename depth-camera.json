@@ -1,0 +1,17 @@
+{
+  "key": "efc2818e-89c0-4741-b949-6c7cd82a1257",
+  "raw_name": "depth-camera",
+  "name": "Depth cameras",
+  "version": 1,
+  "kind": "library",
+  "short": "Backends for Orbbec, Kinect, Azure Kinect and Intel RealSense depth cameras",
+  "long": "Camera SDKs for the Depth Camera Input device: Orbbec (Femto Mega/Bolt, Gemini, Astra, over USB and Ethernet), Kinect v1, Kinect v2, Azure Kinect DK and Intel RealSense. One shared object per SDK, each self-contained and each exporting a single symbol, so several camera families can be used in the same session.",
+  "url": "https://github.com/ossia/score-addon-orbbec",
+  "size": "35M",
+  "linux-x86_64": "https://github.com/ossia/score-addon-orbbec/releases/download/v1.0/depth-camera-linux-x86_64.zip",
+  "linux-amd64": "https://github.com/ossia/score-addon-orbbec/releases/download/v1.0/depth-camera-linux-x86_64.zip",
+  "darwin-aarch64": "https://github.com/ossia/score-addon-orbbec/releases/download/v1.0/depth-camera-darwin-aarch64.zip",
+  "darwin-arm64": "https://github.com/ossia/score-addon-orbbec/releases/download/v1.0/depth-camera-darwin-aarch64.zip",
+  "windows-x86_64": "https://github.com/ossia/score-addon-orbbec/releases/download/v1.0/depth-camera-windows-x86_64.zip",
+  "windows-amd64": "https://github.com/ossia/score-addon-orbbec/releases/download/v1.0/depth-camera-windows-x86_64.zip"
+}

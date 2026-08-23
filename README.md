@@ -451,6 +451,30 @@ v2 backend there at all.
 Each of the three consumers has to be told a different way — see the libusb
 section of `Backends/CMakeLists.txt` and `Backends/cmake/`.
 
+### Cutting a release
+
+Tagging is the whole of it. `git tag -a vX.Y && git push origin vX.Y` runs the
+`Package` workflow, which attaches one `depth-camera-<arch>.zip` per
+architecture to the release.
+
+`depth-camera.json` at the root is the *remote* manifest — the file score's
+package manager fetches to find the download for `score::addonArchitecture()`.
+It is pinned to a tag rather than to `releases/latest`, so that `version` keeps
+meaning something to the update check, which means it has to be regenerated when
+the tag changes:
+
+```sh
+python3 Deployment/make_manifest.py --tag vX.Y --repo ossia/score-addon-orbbec \
+        --out depth-camera.json
+```
+
+`--only` restricts it to the architectures a given release actually carries. A
+key pointing at an asset that does not exist is worse than a missing one: score
+reports a failed download rather than "not available for your platform".
+
+ossia/score-packages lists the raw URL of that file, so it does not need
+touching again after the first time.
+
 `Deployment/CheckPackage.sh <package-dir> "<backends>"` is what CI runs
 afterwards: it fails if a backend the platform is meant to ship is missing, if
 one is there that should not be, or if any of them exports more than its single

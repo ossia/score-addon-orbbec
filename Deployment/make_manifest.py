@@ -48,6 +48,13 @@ def main() -> int:
     ap.add_argument(
         "--size", default="35M", help="approximate installed size, shown in the UI"
     )
+    ap.add_argument(
+        "--only",
+        help="comma-separated architectures to list, when a release does not "
+        "carry all of them. A key pointing at an asset that does not exist is "
+        "worse than a missing key: score reports a failed download rather than "
+        "'not available for your platform'.",
+    )
     args = ap.parse_args()
 
     with open(args.template, encoding="utf-8") as f:
@@ -62,8 +69,17 @@ def main() -> int:
 
     manifest["size"] = args.size
 
+    wanted = ARCHITECTURES
+    if args.only:
+        names = [a.strip() for a in args.only.split(",") if a.strip()]
+        unknown = [a for a in names if a not in ARCHITECTURES]
+        if unknown:
+            print(f"error: unknown architecture(s): {', '.join(unknown)}", file=sys.stderr)
+            return 1
+        wanted = {a: ARCHITECTURES[a] for a in names}
+
     base = f"https://github.com/{args.repo}/releases/download/{args.tag}"
-    for arch, aliases in ARCHITECTURES.items():
+    for arch, aliases in wanted.items():
         url = f"{base}/depth-camera-{arch}.zip"
         for key in [arch] + aliases:
             manifest[key] = url
