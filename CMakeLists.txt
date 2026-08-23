@@ -50,6 +50,23 @@ option(SCORE_DEPTHCAM_BACKENDS_ONLY
 
 if(SCORE_DEPTHCAM_BACKENDS_ONLY)
   set(SCORE_DEPTHCAM_BUILD_BACKENDS ON CACHE BOOL "" FORCE)
+
+  ### Static CRT on MSVC.
+  ###
+  ### A backend built /MD imports MSVCP140.dll and VCRUNTIME140.dll, so it will
+  ### not load on a machine without the Visual C++ redistributable -- and score
+  ### on Windows is built with llvm-mingw, so it does not bring one. A package
+  ### the user downloads has to stand on its own.
+  ###
+  ### Per-module CRTs are what the ABI already assumes: depthcam_abi.h says in
+  ### as many words that no C++ type, container or allocator crosses the
+  ### boundary, and every frame is handed back through the backend's own
+  ### release() hook. It also settles a mismatch that was already there, since
+  ### the OrbbecSDK forces /MT on its vendored libusb and libjpeg-turbo.
+  ###
+  ### Only in this build. Inside score the plug-in has to match whatever score
+  ### was built with.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 if(NOT SCORE_DEPTHCAM_BACKENDS_ONLY AND NOT TARGET score_lib_base)

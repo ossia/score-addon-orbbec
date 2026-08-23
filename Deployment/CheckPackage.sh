@@ -49,17 +49,38 @@ done
 ### support directories, on Linux with RTLD_GLOBAL, so a backend that exports
 ### anything beyond its entry point can interpose a sibling's libusb or libjpeg.
 ### Five SDKs, five private copies.
+###
+### Windows is checked differently, and less strictly. A PE has no global symbol
+### namespace -- imports bind per module, by DLL name -- so the interposition
+### this guards against cannot happen there. It is also not achievable: both
+### libfreenect and librealsense mark their public API __declspec(dllexport)
+### unconditionally in headers we do not own, and neither a .def file nor a
+### linker flag removes an export the compiler put there. So on Windows the
+### requirement is that the entry point is present, and the count is reported.
 for f in "$DIR"/score_depthcam_*."$EXT"; do
   [[ -e "$f" ]] || continue
   case "$EXT" in
     so)    syms=$(nm -D --defined-only "$f" | wc -l) ;;
     # Apple's nm is llvm-nm: -g is external symbols, -U is --defined-only.
     dylib) syms=$(nm -gU "$f" 2>/dev/null | wc -l) ;;
-    # A PE only exports what carries __declspec(dllexport), so there is much
-    # less to go wrong -- but say it out loud anyway, when the tool is there.
     dll)
       command -v dumpbin >/dev/null || { echo "  --    $(basename "$f"): no dumpbin, exports unchecked"; continue; }
-      syms=$(dumpbin //exports "$f" | sed -n 's/^ *[0-9]* *[0-9A-F]* *[0-9A-F]* \(.*\)$/\1/p' | wc -l)
+      # dumpbin's export rows are "ordinal hint RVA name" and nothing else in
+      # its output has that shape; a looser match picks up the header and the
+      # summary and reports extras that are not there.
+      all=$(dumpbin //exports "$f" \
+            | awk 'NF==4 && $1 ~ /^[0-9]+$/ && $3 ~ /^[0-9A-Fa-f]{8}$/ {print $4}')
+      if grep -qx "score_depthcam_backend_v1" <<< "$all"; then
+        n=$(wc -l <<< "$all")
+        if [[ "$n" -eq 1 ]]; then
+          echo "  ok    $(basename "$f") exports 1 symbol"
+        else
+          echo "  ok    $(basename "$f") exports score_depthcam_backend_v1 (+ $((n - 1)) from the SDK's own dllexport)"
+        fi
+      else
+        note "$(basename "$f") does not export score_depthcam_backend_v1"
+      fi
+      continue
       ;;
     *)     continue ;;
   esac
@@ -74,8 +95,20 @@ for f in "$DIR"/score_depthcam_*."$EXT"; do
 done
 
 ### 3. The manifest score reads after installing.
+###
+### Checked with grep rather than a JSON parser on purpose: this runs inside Git
+### Bash on the Windows runner, where `python3` is a Microsoft Store stub that
+### prints an advert and exits 9009.
 if [[ -f "$DIR/package.json" ]]; then
-  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); [sys.exit('package.json missing '+k) for k in ('key','raw_name','name','version','kind') if k not in d]; print('  ok    package.json:', d['raw_name'], d['architecture'] if 'architecture' in d else '')" "$DIR/package.json" || note "package.json is not usable"
+  missing=""
+  for k in key raw_name name version kind architecture; do
+    grep -q "\"$k\"" "$DIR/package.json" || missing="$missing $k"
+  done
+  if [[ -n "$missing" ]]; then
+    note "package.json is missing:$missing"
+  else
+    echo "  ok    package.json: $(sed -n 's/.*"architecture" *: *"\([^"]*\)".*/\1/p' "$DIR/package.json")"
+  fi
 else
   note "no package.json in the package"
 fi

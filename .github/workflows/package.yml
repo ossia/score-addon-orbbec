@@ -21,6 +21,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A superseded run is worth nothing and these jobs are slow enough that the
+# queue matters: three platforms, three vendored SDKs each, and runners that
+# regularly take longer to allocate than the build takes to run.
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   package:
     name: ${{ matrix.config.name }}
@@ -36,7 +43,7 @@ jobs:
             os: ubuntu-22.04
             arch: linux-x86_64
             expect: "orbbec freenect freenect2 k4a realsense"
-            flags: ""
+            flags: "-DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
 
           - name: "macOS (arm64)"
             os: macos-15
@@ -44,13 +51,21 @@ jobs:
             # No Azure Kinect: Microsoft never released an SDK for macOS, so the
             # backend would build and then find nothing to load.
             expect: "orbbec freenect freenect2 realsense"
-            flags: "-DCMAKE_OSX_ARCHITECTURES=arm64"
+            flags: "-DCMAKE_OSX_ARCHITECTURES=arm64 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
 
           - name: "Windows (x86_64)"
             os: windows-2022
             arch: windows-x86_64
             expect: "orbbec freenect freenect2 k4a realsense"
-            flags: ""
+            # Stated rather than left to whatever the runner happens to have
+            # installed. libfreenect2 links the OpenCL ICD loader outright, and
+            # on Windows that is a file a GPU driver puts in System32 rather
+            # than part of the OS -- a machine without one could not load the
+            # Kinect v2 backend at all. The runner has no OpenCL SDK either way,
+            # so this only makes the artefact reproducible. A Kinect v2 on
+            # Windows therefore gets the CPU depth pipeline from this package;
+            # build it yourself with =ON for the fast one.
+            flags: "-DSCORE_DEPTHCAM_FREENECT2_OPENCL=OFF"
 
     steps:
       - uses: actions/checkout@v4

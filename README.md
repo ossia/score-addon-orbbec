@@ -494,7 +494,21 @@ everything it links (`-fvisibility=hidden` plus `--exclude-libs,ALL` plus a
 linker version script) and exports exactly one symbol. CI fails the build if any
 backend exports more than one, because that guarantee is what the whole design
 rests on: score `dlopen`s the contents of its package directories, on Linux with
-`RTLD_GLOBAL`.
+`RTLD_GLOBAL`. macOS gets the same guarantee from an `-exported_symbols_list`.
+
+Windows is the exception, and does not need to be one. A PE has no global symbol
+namespace — imports bind per module, by DLL name — so a second backend exporting
+`freenect_init` cannot be bound to by the first. It is also not achievable there:
+libfreenect and librealsense both mark their public API `__declspec(dllexport)`
+unconditionally, in headers we do not own, and neither a `.def` file nor a linker
+flag removes an export the compiler put in. So on Windows the check is that the
+entry point is present, and the total is reported rather than enforced.
+
+The Windows package is built against the **static** CRT. A backend built `/MD`
+imports `MSVCP140.dll` and will not load without the Visual C++ redistributable,
+which score — built with llvm-mingw — does not bring. A CRT per module is what
+the ABI already assumes anyway: nothing but plain C crosses it, and every frame
+goes back through the backend's own `release()`.
 
 Writing a backend for another camera means implementing one header. Nothing on
 the score side is camera-specific.
