@@ -165,10 +165,18 @@ if(NOT TARGET ob::OrbbecSDK)
   # ARM64, and ARM64EC targets". The SDK's windows_config.cmake defining
   # -D__SSSE3__ for every MSVC target is what gets it that far.
   #
+  # Both macros are needed, and for different reasons. __ARM_NEON__ is what the
+  # two filter headers test to decide *which* header to include; __NEON__ is
+  # Orbbec's own, and the whole of their vendored SSE2NEON.h sits behind
+  # `#ifdef __NEON__` on its second line -- so with only the first the file is
+  # included and contributes nothing, and every _mm_* call becomes "identifier
+  # not found" instead. It is the same pair the SDK's macos_config.cmake sets
+  # for arm64.
+  #
   # SSE2NEON.h does support _M_ARM64; it just insists on the conforming
   # preprocessor, which MSVC still does not use by default.
   if(MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$" AND TARGET filter)
-    target_compile_definitions(filter PRIVATE __ARM_NEON__)
+    target_compile_definitions(filter PRIVATE __ARM_NEON__ __NEON__)
     target_compile_options(filter PRIVATE /Zc:preprocessor)
   endif()
 endif()
