@@ -188,9 +188,24 @@ else()
   set(SCORE_DEPTHCAM_OS "linux")
 endif()
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+# CMAKE_OSX_ARCHITECTURES first, because on macOS it is the only one that tells
+# the truth about a cross build: CMAKE_SYSTEM_PROCESSOR stays the *host's*, so
+# an x86_64 package built on an Apple Silicon machine would otherwise be named
+# darwin-aarch64 and hand an Intel score a set of arm64 binaries.
+set(_depthcam_cpu "${CMAKE_SYSTEM_PROCESSOR}")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES _n_arch)
+  if(_n_arch GREATER 1)
+    message(FATAL_ERROR
+      "score-addon-orbbec: a universal binary has no single architecture key to "
+      "publish under. Build one package per architecture.")
+  endif()
+  set(_depthcam_cpu "${CMAKE_OSX_ARCHITECTURES}")
+endif()
+
+if(_depthcam_cpu MATCHES "^(aarch64|arm64|ARM64)$")
   set(SCORE_DEPTHCAM_CPU "aarch64")
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm|armv7)")
+elseif(_depthcam_cpu MATCHES "^(arm|armv7)")
   set(SCORE_DEPTHCAM_CPU "arm")
 else()
   set(SCORE_DEPTHCAM_CPU "x86_64")

@@ -29,8 +29,11 @@ import sys
 # boost that reports amd64 still finds a download.
 ARCHITECTURES = {
     "linux-x86_64": ["linux-amd64"],
-    "darwin-aarch64": [],
+    "linux-aarch64": ["linux-arm64"],
+    "darwin-x86_64": ["darwin-amd64"],
+    "darwin-aarch64": ["darwin-arm64"],
     "windows-x86_64": ["windows-amd64"],
+    "windows-aarch64": ["windows-arm64"],
 }
 
 HERE = os.path.dirname(os.path.abspath(__file__))

@@ -53,6 +53,21 @@ jobs:
             expect: "orbbec freenect freenect2 realsense"
             flags: "-DCMAKE_OSX_ARCHITECTURES=arm64 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
 
+          - name: "Linux (aarch64)"
+            os: ubuntu-24.04-arm
+            arch: linux-aarch64
+            # No Azure Kinect: Microsoft's runtime is x86_64-only, so the
+            # backend would build against the vendored headers and then have
+            # nothing to dlopen.
+            expect: "orbbec freenect freenect2 realsense"
+            flags: "-DSCORE_DEPTHCAM_BUILD_K4A=OFF -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
+
+          - name: "macOS (x86_64)"
+            os: macos-15-intel
+            arch: darwin-x86_64
+            expect: "orbbec freenect freenect2 realsense"
+            flags: "-DCMAKE_OSX_ARCHITECTURES=x86_64 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
+
           - name: "Windows (x86_64)"
             os: windows-2022
             arch: windows-x86_64
@@ -66,6 +81,13 @@ jobs:
             # Windows therefore gets the CPU depth pipeline from this package;
             # build it yourself with =ON for the fast one.
             flags: "-DSCORE_DEPTHCAM_FREENECT2_OPENCL=OFF"
+
+          - name: "Windows (arm64)"
+            os: windows-11-arm
+            arch: windows-aarch64
+            expect: "orbbec freenect freenect2 realsense"
+            flags: "-DSCORE_DEPTHCAM_BUILD_K4A=OFF -DSCORE_DEPTHCAM_FREENECT2_OPENCL=OFF"
+            msvc_arch: arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -97,7 +119,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.config.msvc_arch || 'x64' }}
 
       - name: Configure
         shell: bash
