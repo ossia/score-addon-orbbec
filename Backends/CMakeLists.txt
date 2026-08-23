@@ -11,6 +11,14 @@
 
 set(SCORE_DEPTHCAM_SDK_DIR "${CMAKE_CURRENT_LIST_DIR}/../3rdparty")
 
+### Everything under here ends up inside a shared module, static archives
+### included, so all of it has to be position-independent. score sets this for
+### its whole build and the requirement went unnoticed; a standalone
+### backends-only configuration fails at link time instead ("relocation
+### R_X86_64_PC32 against symbol `_ZSt4cerr' can not be used when making a
+### shared object").
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 ### libfreenect and librealsense each declare a global `uninstall` target, and
 ### score already has one (3rdparty/sh4lt, 3rdparty/shmdata). CMake makes a
 ### duplicate custom target a hard error, and these are pinned upstream
@@ -34,6 +42,12 @@ endfunction()
 ### --exclude-libs was added. Two backends in one process would then bind to
 ### whichever copy the loader saw first.
 function(score_depthcam_setup_backend Target)
+  # The authoritative list of what this configuration produces. `depthcam-package`
+  # depends on it, and CI compares it against what the platform is meant to
+  # ship: a backend silently skipped because a dependency was missing would
+  # otherwise just come out as a smaller zip.
+  set_property(GLOBAL APPEND PROPERTY SCORE_DEPTHCAM_BACKENDS ${Target})
+
   set_target_properties(${Target} PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     C_VISIBILITY_PRESET hidden
@@ -90,6 +104,19 @@ function(score_depthcam_setup_backend Target)
   elseif(APPLE)
     target_link_options(${Target} PRIVATE "LINKER:-rpath,@loader_path")
     set_target_properties(${Target} PROPERTIES INSTALL_RPATH "@loader_path")
+
+    # CMake gives a MODULE library the .so suffix on macOS. BackendRegistry
+    # globs score_depthcam_*.dylib there, and a plug-in loader that finds
+    # nothing is indistinguishable from a package that failed to download.
+    set_target_properties(${Target} PROPERTIES SUFFIX ".dylib")
+
+    # The Mach-O counterpart of the version script below. Two-level namespaces
+    # make macOS far less prone to the interposition this guards against, but
+    # the guarantee is the same one the ABI documents, so state it on both.
+    target_link_options(${Target} PRIVATE
+      "LINKER:-exported_symbols_list,${CMAKE_CURRENT_LIST_DIR}/backend.symbols")
+    set_property(TARGET ${Target} APPEND PROPERTY
+      LINK_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/backend.symbols")
   endif()
 endfunction()
 
@@ -131,7 +158,9 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE INTERNAL "")
 set(CMAKE_UNITY_BUILD OFF)
 
 ### --- Orbbec (Femto, Gemini, Astra) ----------------------------------------
-if(TARGET ob::OrbbecSDK)
+option(SCORE_DEPTHCAM_BUILD_ORBBEC "Build the Orbbec backend" ON)
+
+if(SCORE_DEPTHCAM_BUILD_ORBBEC AND TARGET ob::OrbbecSDK)
   add_library(score_depthcam_orbbec MODULE Orbbec/OrbbecBackend.cpp)
 
   # One file per backend where possible: the SDK's CMake only ever builds
@@ -152,10 +181,30 @@ if(TARGET ob::OrbbecSDK)
       "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/src"
       "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/include")
     # These come from the SDK's add_definitions(), which is directory-scoped and
-    # so does not reach a target defined here.
+    # so does not reach a target defined here. They have to match what the SDK's
+    # own cmake/<platform>_config.cmake would have set, because the sources
+    # compiled into this target are the same ones the SDK compiles: getting
+    # OS_LINUX onto a macOS build is not a warning, it selects a different
+    # ObPal.
     target_compile_definitions(score_depthcam_orbbec PRIVATE
-      BUILD_USB_PAL BUILD_NET_PAL BUILD_GMSL_PAL OS_LINUX
+      BUILD_USB_PAL BUILD_NET_PAL
       $<$<CONFIG:Debug>:OB_DEBUG> $<$<NOT:$<CONFIG:Debug>>:OB_RELEASE>)
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      # GMSL is the coaxial/serialiser transport on Jetson-class boards. The
+      # SDK only ever compiles its sources under OB_BUILD_LINUX.
+      target_compile_definitions(score_depthcam_orbbec PRIVATE OS_LINUX BUILD_GMSL_PAL)
+    elseif(APPLE)
+      target_compile_definitions(score_depthcam_orbbec PRIVATE OS_MACOS)
+      if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        target_compile_definitions(score_depthcam_orbbec PRIVATE OS_MACOS_ARM64 __NEON__)
+      else()
+        target_compile_definitions(score_depthcam_orbbec PRIVATE OS_MACOS_X64)
+      endif()
+    elseif(WIN32)
+      target_compile_definitions(score_depthcam_orbbec PRIVATE
+        _UNICODE UNICODE _CRT_SECURE_NO_WARNINGS)
+    endif()
     target_link_libraries(score_depthcam_orbbec PRIVATE
       ob::shared ob::core ob::filter ob::platform ob::device ob::pipeline ob::media)
   else()
@@ -293,12 +342,25 @@ endif()
 ### buildable in CI without the SDK, lets the user install it through their own
 ### package manager, and avoids redistributing libdepthengine, a closed
 ### Microsoft binary that any depth output requires.
-add_library(score_depthcam_k4a MODULE K4A/K4ABackend.cpp)
-target_include_directories(score_depthcam_k4a SYSTEM PRIVATE "${CMAKE_CURRENT_LIST_DIR}/K4A")
-score_depthcam_setup_backend(score_depthcam_k4a)
-score_depthcam_install_udev_rules("${CMAKE_CURRENT_LIST_DIR}/K4A/udev")
-if(UNIX AND NOT APPLE)
-  target_link_libraries(score_depthcam_k4a PRIVATE ${CMAKE_DL_LIBS})
+### Off by default on macOS: Microsoft never released an Azure Kinect SDK for
+### it, so the backend would build (it only needs the vendored headers) and then
+### never find anything to dlopen.
+if(APPLE)
+  set(SCORE_DEPTHCAM_K4A_DEFAULT OFF)
+else()
+  set(SCORE_DEPTHCAM_K4A_DEFAULT ON)
+endif()
+option(SCORE_DEPTHCAM_BUILD_K4A "Build the Azure Kinect backend"
+       ${SCORE_DEPTHCAM_K4A_DEFAULT})
+
+if(SCORE_DEPTHCAM_BUILD_K4A)
+  add_library(score_depthcam_k4a MODULE K4A/K4ABackend.cpp)
+  target_include_directories(score_depthcam_k4a SYSTEM PRIVATE "${CMAKE_CURRENT_LIST_DIR}/K4A")
+  score_depthcam_setup_backend(score_depthcam_k4a)
+  score_depthcam_install_udev_rules("${CMAKE_CURRENT_LIST_DIR}/K4A/udev")
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(score_depthcam_k4a PRIVATE ${CMAKE_DL_LIBS})
+  endif()
 endif()
 
 ### --- Intel RealSense (librealsense) ---------------------------------------
@@ -336,6 +398,14 @@ if(SCORE_DEPTHCAM_BUILD_REALSENSE
   # uint64_t without including <cstdint>. That compiled while libstdc++ still
   # pulled it in transitively; it does not any more. Force it in rather than
   # patching a pinned submodule.
+  # librealsense's vendored zstd calls qsort_r, which glibc only declares under
+  # _GNU_SOURCE. score defines that for its whole build, so this only surfaces
+  # in a standalone backends-only configuration -- which is exactly what CI
+  # packages.
+  if(TARGET realsense-file AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(realsense-file PRIVATE _GNU_SOURCE)
+  endif()
+
   foreach(_rs_target realsense-file realsense2)
     if(TARGET ${_rs_target} AND NOT MSVC)
       # C++ only: realsense-file mixes C and C++ sources, and <cstdint> does
@@ -356,3 +426,15 @@ if(SCORE_DEPTHCAM_BUILD_REALSENSE
 endif()
 
 unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)
+
+### One target that builds whatever backends this configuration enabled, so
+### neither CI nor a developer has to keep a list of target names in step with
+### this file.
+get_property(_backends GLOBAL PROPERTY SCORE_DEPTHCAM_BACKENDS)
+add_custom_target(depthcam-backends)
+if(_backends)
+  add_dependencies(depthcam-backends ${_backends})
+  message(STATUS "score-addon-orbbec: backends -> ${_backends}")
+else()
+  message(WARNING "score-addon-orbbec: no camera backend will be built")
+endif()

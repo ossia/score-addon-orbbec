@@ -36,7 +36,23 @@ option(SCORE_DEPTHCAM_BUILD_BACKENDS
        "Build the camera SDK backends alongside the plug-in"
        ${SCORE_DEPTHCAM_BACKENDS_DEFAULT})
 
-if(NOT TARGET score_lib_base)
+### Whether to build *only* the backends, with no score at all.
+###
+### This is what CI packages. The backends share no code with the plug-in --
+### they talk to it through the pure-C depthcam_abi.h and are dlopen'd at
+### runtime -- so building them needs a C++ compiler and the vendored SDKs and
+### nothing else: no score checkout, no Qt, no ossia SDK. Keeping the package
+### job free of all that is not just a speed-up, it is what makes it possible to
+### release a package without a working score build on that platform.
+option(SCORE_DEPTHCAM_BACKENDS_ONLY
+       "Build the camera backends and their package, without the score plug-in"
+       OFF)
+
+if(SCORE_DEPTHCAM_BACKENDS_ONLY)
+  set(SCORE_DEPTHCAM_BUILD_BACKENDS ON CACHE BOOL "" FORCE)
+endif()
+
+if(NOT SCORE_DEPTHCAM_BACKENDS_ONLY AND NOT TARGET score_lib_base)
   include("${SCORE_SOURCE_DIR}/cmake/ScoreExternalAddon.cmake")
 endif()
 
@@ -199,7 +215,15 @@ add_custom_target(depthcam-package
   COMMENT "Packaging depth-camera-${SCORE_DEPTHCAM_ARCH}.zip"
   VERBATIM)
 
+### So that `cmake --build . --target depthcam-package` is the whole recipe.
+add_dependencies(depthcam-package depthcam-backends)
+
 endif() # SCORE_DEPTHCAM_BUILD_BACKENDS
+
+### Everything below needs score. Stop here when only the package was asked for.
+if(SCORE_DEPTHCAM_BACKENDS_ONLY)
+  return()
+endif()
 
 # General initialization
 score_common_setup()

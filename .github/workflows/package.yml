@@ -1,14 +1,16 @@
-# Builds the depth-camera package: one archive per architecture, containing
-# every camera backend.
+# Builds the depth-camera package -- one zip per architecture, containing every
+# camera backend that platform can carry -- ready to be listed in
+# ossia/score-packages.
 #
-# Separate from builds.yaml, which checks that the add-on compiles. This one
-# produces the artefact users actually download, so it is a Release build, it
-# strips, and on a tag it uploads.
+# What it does *not* do is build score. The backends share no code with the
+# score plug-in: they talk to it through the pure-C depthcam_abi.h and are
+# dlopen'd at runtime. So -DSCORE_DEPTHCAM_BACKENDS_ONLY=1 needs a C++ compiler
+# and the vendored SDKs and nothing else -- no score checkout, no Qt, no ossia
+# SDK. That is what makes it possible to publish a package for a platform
+# without a working score build on it, and it takes minutes rather than hours.
 #
-# fail-fast is off on purpose. The five SDKs do not all support the three
-# platforms -- libk4a has no macOS build at all, and libfreenect2 needs
-# libusb from the system -- so a platform failing must not take the others
-# down with it.
+# fail-fast is off on purpose: the SDKs do not all support all three platforms,
+# so one going red must not cancel the others.
 
 name: Package
 
@@ -27,98 +29,82 @@ jobs:
       fail-fast: false
       matrix:
         config:
-          - {
-              name: "Linux (x86_64)",
-              os: ubuntu-latest,
-              arch: "linux-x86_64",
-              path: "/opt/ossia-sdk/llvm/bin",
-              flags: "-DCMAKE_C_COMPILER=/opt/ossia-sdk/llvm/bin/clang -DCMAKE_CXX_COMPILER=/opt/ossia-sdk/llvm/bin/clang++",
-              dependencies: "sudo apt update && sudo apt install -y libgl-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-*-dev libX11-*-dev libz-dev libxext-dev libusb-1.0-0-dev libturbojpeg0-dev ocl-icd-opencl-dev",
-              sdk: "/opt/ossia-sdk",
-            }
-          - {
-              name: "macOS (arm64)",
-              os: macos-latest,
-              arch: "darwin-aarch64",
-              flags: "",
-              dependencies: "brew install libusb jpeg-turbo",
-              sdk: "/opt/ossia-sdk-aarch64",
-            }
-          - {
-              name: "Windows (x86_64)",
-              os: windows-latest,
-              arch: "windows-x86_64",
-              path: "/c/ossia-sdk/llvm/bin",
-              flags: "-GNinja -DCMAKE_C_COMPILER=c:/ossia-sdk/llvm/bin/clang.exe -DCMAKE_CXX_COMPILER=c:/ossia-sdk/llvm/bin/clang++.exe",
-              dependencies: "cinst ninja",
-              sdk: "/c/ossia-sdk",
-            }
+          # `expect` is checked against the package afterwards. Every backend is
+          # optional at configure time, so a missing system dependency otherwise
+          # drops one silently and the build still passes.
+          - name: "Linux (x86_64)"
+            os: ubuntu-22.04
+            arch: linux-x86_64
+            expect: "orbbec freenect freenect2 k4a realsense"
+            flags: ""
+
+          - name: "macOS (arm64)"
+            os: macos-15
+            arch: darwin-aarch64
+            # No Azure Kinect: Microsoft never released an SDK for macOS, so the
+            # backend would build and then find nothing to load.
+            expect: "orbbec freenect freenect2 realsense"
+            flags: "-DCMAKE_OSX_ARCHITECTURES=arm64"
+
+          - name: "Windows (x86_64)"
+            os: windows-2022
+            arch: windows-x86_64
+            expect: "orbbec freenect freenect2 k4a realsense"
+            flags: ""
 
     steps:
-      - name: Checkout add-on
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          submodules: "recursive"
-          path: addon
+          submodules: recursive
 
-      - name: Checkout score
-        uses: actions/checkout@v4
-        with:
-          repository: ossia/score
-          submodules: "recursive"
-          path: score
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build \
+            libusb-1.0-0-dev libudev-dev libturbojpeg0-dev ocl-icd-opencl-dev
 
-      - name: Install dependencies
-        shell: bash
-        run: ${{ matrix.config.dependencies }}
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja libusb jpeg-turbo
 
-      - name: Download SDK
-        shell: bash
-        run: cd score && tools/fetch-sdk.sh
-
-      - name: Build the backends
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
         shell: bash
         run: |
-          if [[ "${{ matrix.config.path }}" != "" ]]; then
-            export PATH=${{ matrix.config.path }}:$PATH
+          choco install ninja -y --no-progress
+          # libfreenect and libfreenect2 talk to the Kinects over raw USB and
+          # have no Windows backend of their own.
+          vcpkg install libusb:x64-windows
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: bash
+        run: |
+          extra=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            extra="-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
           fi
 
-          cmake -S addon -B build \
-            -DSCORE_SOURCE_DIR=$PWD/score \
-            -DOSSIA_SDK=${{ matrix.config.sdk }} \
+          cmake -S . -B build -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
-            ${{ matrix.config.flags }}
+            -DSCORE_DEPTHCAM_BACKENDS_ONLY=1 \
+            ${{ matrix.config.flags }} $extra
 
-          # Backends only. The plug-in itself is statically linked into score
-          # and is not part of this artefact.
-          cmake --build build --target \
-            score_depthcam_orbbec \
-            score_depthcam_k4a \
-            score_depthcam_freenect \
-            score_depthcam_freenect2 \
-            score_depthcam_realsense
+      - name: Build the package
+        shell: bash
+        run: cmake --build build --target depthcam-package
 
-          cmake --build build --target depthcam-package
-
-      - name: Check the exported symbols
-        if: runner.os == 'Linux'
+      - name: Check the package
         shell: bash
         run: |
-          # The whole design rests on this: score dlopens everything in its
-          # support and package directories, on Linux with RTLD_GLOBAL, so a
-          # backend that exports anything beyond its entry point can interpose
-          # a sibling's libusb or libjpeg. Five SDKs, five private copies.
-          fail=0
-          for so in build/depth-camera/score_depthcam_*.so; do
-            n=$(nm -D --defined-only "$so" | wc -l)
-            echo "$so exports $n symbol(s)"
-            if [ "$n" -ne 1 ]; then
-              echo "::error::$so exports $n symbols, expected exactly 1"
-              nm -D --defined-only "$so" | head -20
-              fail=1
-            fi
-          done
-          exit $fail
+          Deployment/CheckPackage.sh \
+            build/depth-camera-stage/depth-camera "${{ matrix.config.expect }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -133,5 +119,33 @@ jobs:
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: build/depth-camera-${{ matrix.config.arch }}.zip
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  # The manifest the package manager reads. Written once, from the tag, so the
+  # download URLs cannot drift from the assets the jobs above just uploaded.
+  manifest:
+    name: Manifest
+    needs: package
+    if: startsWith(github.ref, 'refs/tags')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Generate depth-camera.json
+        run: |
+          python3 Deployment/make_manifest.py \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --out depth-camera.json
+          cat depth-camera.json
+
+      - name: Attach to the release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: depth-camera.json
           tag: ${{ github.ref }}
           overwrite: true

@@ -1,0 +1,3 @@
+# The macOS counterpart of backend.version: every backend exports exactly one
+# symbol. Mach-O prefixes C symbols with an underscore.
+_score_depthcam_backend_v1

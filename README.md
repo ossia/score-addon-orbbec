@@ -401,12 +401,36 @@ Individual backends build only when their submodule is present, and each can be
 turned off:
 
 ```
+-DSCORE_DEPTHCAM_BUILD_ORBBEC=OFF
 -DSCORE_DEPTHCAM_BUILD_FREENECT=OFF
 -DSCORE_DEPTHCAM_BUILD_FREENECT2=OFF
+-DSCORE_DEPTHCAM_BUILD_K4A=OFF          # off by default on macOS: no SDK exists there
 -DSCORE_DEPTHCAM_BUILD_REALSENSE=OFF
 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON    # Kinect v2 GPU depth pipeline, on by default
 -DSCORE_DEPTHCAM_ORBBEC_STATIC=ON       # build the OrbbecSDK into the backend
 ```
+
+### Building the package on its own
+
+The reverse of the above: backends and no plug-in.
+
+```sh
+cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+      -DSCORE_DEPTHCAM_BACKENDS_ONLY=1
+cmake --build build --target depthcam-package
+```
+
+This needs a C++ compiler and the vendored SDKs and **nothing else** — no score
+checkout, no Qt, no ossia SDK. The backends share no code with the plug-in; they
+meet it at the pure-C `depthcam_abi.h` and are `dlopen`'d at runtime. That is
+what lets the `Package` workflow publish a package for a platform without a
+working score build on it, in minutes rather than hours.
+
+`Deployment/CheckPackage.sh <package-dir> "<backends>"` is what CI runs
+afterwards: it fails if a backend the platform is meant to ship is missing, if
+one is there that should not be, or if any of them exports more than its single
+entry point. Every backend is optional at configure time, so a missing system
+dependency otherwise drops one silently and the build still passes.
 
 To produce the distributable package:
 

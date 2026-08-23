@@ -6,6 +6,6 @@
     "kind": "library",
     "short": "Backends for Orbbec, Kinect, Azure Kinect and Intel RealSense depth cameras",
     "long": "Camera SDKs for the Depth Camera Input device: Orbbec (Femto Mega/Bolt, Gemini, Astra, over USB and Ethernet), Kinect v1, Kinect v2, Azure Kinect DK and Intel RealSense. One shared object per SDK, each self-contained and each exporting a single symbol, so several camera families can be used in the same session.",
-    "url": "https://github.com/jcelerier/score-addon-orbbec",
+    "url": "https://github.com/ossia/score-addon-orbbec",
     "architecture": "@SCORE_DEPTHCAM_ARCH@"
 }
