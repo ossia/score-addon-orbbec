@@ -426,6 +426,31 @@ meet it at the pure-C `depthcam_abi.h` and are `dlopen`'d at runtime. That is
 what lets the `Package` workflow publish a package for a platform without a
 working score build on it, in minutes rather than hours.
 
+### What each platform needs installed
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| libusb | system (`libusb-1.0-0-dev`) | vendored, static | vendored, static |
+| libjpeg-turbo | system (`libturbojpeg0-dev`) | vendored, static | vendored, static |
+| OpenCL (Kinect v2 depth) | system (`ocl-icd-opencl-dev`), optional | — | — |
+| udev | system (`libudev-dev`) | — | — |
+
+The vendored copies are the OrbbecSDK's, which already carries libusb 1.0.26
+and libjpeg-turbo and builds both for winusb and darwin_usb.
+
+Off Linux that is not a preference, it is the only thing that works. macOS has
+no system libusb, and linking Homebrew's leaves the shipped backend referencing
+`/opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib`, a path that exists only on
+the machine that built it. Windows has none either, and shipping the DLL beside
+the backend does not help: Windows resolves a module's dependencies through the
+standard search order, which does not include the directory the module itself
+came from. libfreenect2 also *requires* libjpeg-turbo on Windows, where it has
+no VideoToolbox to fall back on, so without a vendored copy there is no Kinect
+v2 backend there at all.
+
+Each of the three consumers has to be told a different way — see the libusb
+section of `Backends/CMakeLists.txt` and `Backends/cmake/`.
+
 `Deployment/CheckPackage.sh <package-dir> "<backends>"` is what CI runs
 afterwards: it fails if a backend the platform is meant to ship is missing, if
 one is there that should not be, or if any of them exports more than its single

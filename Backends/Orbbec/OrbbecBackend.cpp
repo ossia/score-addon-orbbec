@@ -10,9 +10,11 @@
 
 #include <libobsensor/ObSensor.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>

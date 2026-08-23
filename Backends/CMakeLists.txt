@@ -29,7 +29,32 @@ function(add_custom_target)
   if("${ARGV0}" STREQUAL "uninstall" AND TARGET uninstall)
     return()
   endif()
+
+  # librealsense's Windows 7 UVC driver target lists its DEPENDS as bare
+  # filenames relative to the *source* drivers directory. ninja resolves them
+  # against the build directory, finds nothing, and refuses to generate anything
+  # at all: "'IntelRealSense_D400_series_win7.inf', needed by
+  # 'realsense-driver', missing and no known rule to make it". The files
+  # themselves are already copied by configure_file just above; only the DEPENDS
+  # is wrong, and we ship no drivers, so drop it and keep the target so
+  # librealsense's add_dependencies still resolves.
+  if("${ARGV0}" STREQUAL "realsense-driver")
+    _add_custom_target(realsense-driver)
+    return()
+  endif()
+
   _add_custom_target(${ARGV})
+endfunction()
+
+### Nothing in this tree is ever installed. The SDKs below all carry install()
+### and install(EXPORT) rules for their own packaging, and those rules are a
+### steady source of configure-time failures that have nothing to do with us:
+### librealsense exports realsense2, realsense2 links the `usb` target we hand
+### it, and CMake then refuses the export set because the vendored libusb behind
+### it is in no export set either -- a chain with no end that only exists to
+### produce files no one asked for. Same override as above, same directory
+### scope, so it reaches the SDK subtrees added below and nothing else.
+function(install)
 endfunction()
 
 ### Settings every backend needs, whatever SDK it wraps.
@@ -49,6 +74,15 @@ function(score_depthcam_setup_backend Target)
   set_property(GLOBAL APPEND PROPERTY SCORE_DEPTHCAM_BACKENDS ${Target})
 
   set_target_properties(${Target} PROPERTIES
+    # Stated, not inherited. Inside score every target is C++20 already, so the
+    # backends compiled as C++20 by accident; standalone they get whatever the
+    # compiler defaults to. Apple clang's default is old enough that
+    # `std::lock_guard lock{m}` and std::size are both errors, and every backend
+    # fills in its ABI vtable with designated initializers, which MSVC accepts
+    # only at C++20 -- gcc and clang take them as an extension at any standard,
+    # which is exactly why nobody noticed.
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
     CXX_VISIBILITY_PRESET hidden
     C_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON
@@ -157,6 +191,52 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE INTERNAL "")
 ### whatever the build was configured with.
 set(CMAKE_UNITY_BUILD OFF)
 
+### --- libusb ----------------------------------------------------------------
+###
+### On Linux libusb is a system library. Every distribution ships it, it is what
+### the udev rules in this tree are written against, and linking it is ordinary.
+###
+### Nowhere else. macOS has no libusb at all: linking Homebrew's leaves the
+### backends referencing /opt/homebrew/opt/libusb/lib/libusb-1.0.0.dylib, an
+### absolute path that exists only on the machine that built the package.
+### Windows has none either, and shipping the DLL beside the backend does not
+### help -- Windows resolves a module's dependencies through the standard search
+### order, which does not include the directory the module itself came from, so
+### a libusb-1.0.dll sitting right next to it is simply not found.
+###
+### So off Linux, link the copy the OrbbecSDK already vendors, statically. It is
+### 1.0.26, it builds against winusb and darwin_usb, and it is already here.
+### Each of the three consumers has to be told a different way.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET libusb_static)
+  set(SCORE_DEPTHCAM_LIBUSB_INCLUDE
+      "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/3rdparty/libusb/src/libusb"
+      CACHE INTERNAL "")
+
+  # libfreenect: its Findlibusb-1.0.cmake short-circuits when both of these are
+  # already set ("in cache already").
+  set(LIBUSB_1_INCLUDE_DIRS "${SCORE_DEPTHCAM_LIBUSB_INCLUDE}" CACHE PATH "" FORCE)
+  set(LIBUSB_1_LIBRARIES libusb_static CACHE STRING "" FORCE)
+
+  # libfreenect2: only reachable by shadowing its find module. See cmake/FindLibUSB.cmake.
+  list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+
+  # And the same for libjpeg-turbo, which the SDK also vendors. libfreenect2
+  # requires it on Windows -- only macOS has VideoToolbox to fall back on -- so
+  # without this there is no Kinect v2 backend there at all.
+  if(TARGET turbojpeg_static)
+    set(SCORE_DEPTHCAM_TURBOJPEG_INCLUDE
+        "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/3rdparty/libjpeg/src"
+        CACHE INTERNAL "")
+    set(SCORE_DEPTHCAM_VENDORED_TURBOJPEG ON)
+  endif()
+
+  # librealsense is handled in its own section below: the target it looks for
+  # has to join an export set that only exists once it has been added.
+
+  set(SCORE_DEPTHCAM_VENDORED_LIBUSB ON)
+  message(STATUS "score-addon-orbbec: using the vendored static libusb")
+endif()
+
 ### --- Orbbec (Femto, Gemini, Astra) ----------------------------------------
 option(SCORE_DEPTHCAM_BUILD_ORBBEC "Build the Orbbec backend" ON)
 
@@ -173,38 +253,71 @@ if(SCORE_DEPTHCAM_BUILD_ORBBEC AND TARGET ob::OrbbecSDK)
          "Build the OrbbecSDK into the backend instead of alongside it" ON)
 
   if(SCORE_DEPTHCAM_ORBBEC_STATIC)
+    # An object library rather than more sources on the backend, because the two
+    # halves cannot agree on a C++ standard. Ours uses designated initializers
+    # to fill in the ABI vtable, which MSVC accepts only at C++20 (gcc and clang
+    # take them as an extension, which is why this went unnoticed). The SDK's
+    # were written for C++11, and at C++20 spdlog's format strings turn consteval
+    # and its logging calls stop compiling against Apple's libc++. Compile each
+    # at what it needs and link the objects together.
     file(GLOB _ob_api
       "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/src/impl/*.cpp"
       "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/src/context/*.cpp")
-    target_sources(score_depthcam_orbbec PRIVATE ${_ob_api})
-    target_include_directories(score_depthcam_orbbec SYSTEM PRIVATE
+
+    add_library(score_depthcam_orbbec_sdk OBJECT ${_ob_api})
+    set_target_properties(score_depthcam_orbbec_sdk PROPERTIES
+      CXX_STANDARD 17
+      CXX_STANDARD_REQUIRED ON
+      CXX_VISIBILITY_PRESET hidden
+      C_VISIBILITY_PRESET hidden
+      VISIBILITY_INLINES_HIDDEN ON
+      POSITION_INDEPENDENT_CODE ON)
+
+    target_include_directories(score_depthcam_orbbec_sdk SYSTEM PRIVATE
       "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/src"
       "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/include")
+
     # These come from the SDK's add_definitions(), which is directory-scoped and
     # so does not reach a target defined here. They have to match what the SDK's
-    # own cmake/<platform>_config.cmake would have set, because the sources
-    # compiled into this target are the same ones the SDK compiles: getting
-    # OS_LINUX onto a macOS build is not a warning, it selects a different
-    # ObPal.
-    target_compile_definitions(score_depthcam_orbbec PRIVATE
-      BUILD_USB_PAL BUILD_NET_PAL
+    # own cmake/<platform>_config.cmake would have set, because these are the
+    # same sources the SDK compiles: getting OS_LINUX onto a macOS build is not
+    # a warning, it selects a different ObPal.
+    #
+    # OB_STATIC_DEFINE is ours. The SDK's generated Export.h marks its public C
+    # API __declspec(dllimport) for anyone who is not building the DLL, and
+    # these translation units *define* those functions -- MSVC rejects that
+    # outright ("definition of dllimport function not allowed"). We are not
+    # consuming a DLL on any platform here, so say so everywhere.
+    target_compile_definitions(score_depthcam_orbbec_sdk PRIVATE
+      OB_STATIC_DEFINE BUILD_USB_PAL BUILD_NET_PAL
       $<$<CONFIG:Debug>:OB_DEBUG> $<$<NOT:$<CONFIG:Debug>>:OB_RELEASE>)
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       # GMSL is the coaxial/serialiser transport on Jetson-class boards. The
       # SDK only ever compiles its sources under OB_BUILD_LINUX.
-      target_compile_definitions(score_depthcam_orbbec PRIVATE OS_LINUX BUILD_GMSL_PAL)
+      target_compile_definitions(score_depthcam_orbbec_sdk PRIVATE OS_LINUX BUILD_GMSL_PAL)
     elseif(APPLE)
-      target_compile_definitions(score_depthcam_orbbec PRIVATE OS_MACOS)
+      target_compile_definitions(score_depthcam_orbbec_sdk PRIVATE OS_MACOS)
       if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
-        target_compile_definitions(score_depthcam_orbbec PRIVATE OS_MACOS_ARM64 __NEON__)
+        target_compile_definitions(score_depthcam_orbbec_sdk PRIVATE OS_MACOS_ARM64 __NEON__)
       else()
-        target_compile_definitions(score_depthcam_orbbec PRIVATE OS_MACOS_X64)
+        target_compile_definitions(score_depthcam_orbbec_sdk PRIVATE OS_MACOS_X64)
       endif()
     elseif(WIN32)
-      target_compile_definitions(score_depthcam_orbbec PRIVATE
+      target_compile_definitions(score_depthcam_orbbec_sdk PRIVATE
         _UNICODE UNICODE _CRT_SECURE_NO_WARNINGS)
     endif()
+
+    # Linked for their headers; the archives themselves go on the backend below.
+    target_link_libraries(score_depthcam_orbbec_sdk PRIVATE
+      ob::shared ob::core ob::filter ob::platform ob::device ob::pipeline ob::media)
+
+    target_sources(score_depthcam_orbbec
+      PRIVATE $<TARGET_OBJECTS:score_depthcam_orbbec_sdk>)
+    target_compile_definitions(score_depthcam_orbbec PRIVATE OB_STATIC_DEFINE)
+    target_include_directories(score_depthcam_orbbec SYSTEM PRIVATE
+      "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/src"
+      "${SCORE_DEPTHCAM_SDK_DIR}/OrbbecSDK_v2/include")
     target_link_libraries(score_depthcam_orbbec PRIVATE
       ob::shared ob::core ob::filter ob::platform ob::device ob::pipeline ob::media)
   else()
@@ -275,9 +388,17 @@ if(SCORE_DEPTHCAM_BUILD_FREENECT2
   # See compat/freenect2_cl_compat.h: modern CL headers turned CL_ICDL_VERSION
   # into a macro, which breaks a local declaration of the same name in
   # libfreenect2's OpenCL processors.
-  if(TARGET freenect2 AND SCORE_DEPTHCAM_FREENECT2_OPENCL AND NOT MSVC)
-    target_compile_options(freenect2 PRIVATE
-      "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_CURRENT_LIST_DIR}/Freenect2/compat/freenect2_cl_compat.h>")
+  if(TARGET freenect2 AND SCORE_DEPTHCAM_FREENECT2_OPENCL)
+    if(MSVC)
+      # cl.exe spells -include as /FI, and it needs the shim just as much:
+      # without it both OpenCL processors fail with "error C2059: syntax error:
+      # 'constant'" on the same line.
+      target_compile_options(freenect2 PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:SHELL:/FI${CMAKE_CURRENT_LIST_DIR}/Freenect2/compat/freenect2_cl_compat.h>")
+    else()
+      target_compile_options(freenect2 PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_CURRENT_LIST_DIR}/Freenect2/compat/freenect2_cl_compat.h>")
+    endif()
   endif()
 
   if(TARGET freenect2)
@@ -315,6 +436,14 @@ if(SCORE_DEPTHCAM_BUILD_FREENECT
   set(BUILD_REDIST_PACKAGE ON CACHE INTERNAL "")
 
   add_subdirectory("${SCORE_DEPTHCAM_SDK_DIR}/libfreenect" libfreenect EXCLUDE_FROM_ALL)
+
+  # libfreenect always defines both a shared `freenect` and a static
+  # `freenectstatic`, and on Windows they collide: the import library of the DLL
+  # and the static library are both freenect.lib, which ninja rejects outright
+  # ("multiple rules generate lib/freenect.lib"). We link the static one.
+  if(WIN32 AND TARGET freenectstatic)
+    set_target_properties(freenectstatic PROPERTIES OUTPUT_NAME freenect_static)
+  endif()
 
   set(_freenect_target "")
   if(TARGET freenectstatic)
@@ -387,6 +516,13 @@ if(SCORE_DEPTHCAM_BUILD_REALSENSE
   # sanitizer build tree uses "install", so a perfectly ordinary configuration
   # otherwise fails here. Nothing in this tree is ever installed; the value only
   # has to be well-formed.
+  # librealsense: CMake/libusb_config.cmake does nothing at all if a target
+  # called `usb` already exists, which is the cleanest of the three ways in.
+  if(SCORE_DEPTHCAM_VENDORED_LIBUSB AND NOT TARGET usb)
+    add_library(usb INTERFACE)
+    target_link_libraries(usb INTERFACE libusb_static)
+  endif()
+
   block()
     if(NOT IS_ABSOLUTE "${CMAKE_INSTALL_PREFIX}")
       set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_PREFIX}")

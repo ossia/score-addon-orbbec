@@ -53,13 +53,21 @@ for f in "$DIR"/score_depthcam_*."$EXT"; do
   [[ -e "$f" ]] || continue
   case "$EXT" in
     so)    syms=$(nm -D --defined-only "$f" | wc -l) ;;
-    dylib) syms=$(nm -gU "$f" 2>/dev/null | grep -c ' T \| S \| D ') ;;
-    *)     continue ;;   # Windows exports only what is __declspec(dllexport)
+    # Apple's nm is llvm-nm: -g is external symbols, -U is --defined-only.
+    dylib) syms=$(nm -gU "$f" 2>/dev/null | wc -l) ;;
+    # A PE only exports what carries __declspec(dllexport), so there is much
+    # less to go wrong -- but say it out loud anyway, when the tool is there.
+    dll)
+      command -v dumpbin >/dev/null || { echo "  --    $(basename "$f"): no dumpbin, exports unchecked"; continue; }
+      syms=$(dumpbin //exports "$f" | sed -n 's/^ *[0-9]* *[0-9A-F]* *[0-9A-F]* \(.*\)$/\1/p' | wc -l)
+      ;;
+    *)     continue ;;
   esac
   if [[ "$syms" -ne 1 ]]; then
     note "$(basename "$f") exports $syms symbols, expected exactly 1"
     [[ "$EXT" == so ]] && nm -D --defined-only "$f" | head -20
     [[ "$EXT" == dylib ]] && nm -gU "$f" | head -20
+    [[ "$EXT" == dll ]] && dumpbin //exports "$f" | head -30
   else
     echo "  ok    $(basename "$f") exports 1 symbol"
   fi

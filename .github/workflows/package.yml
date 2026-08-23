@@ -64,18 +64,19 @@ jobs:
           sudo apt-get install -y ninja-build \
             libusb-1.0-0-dev libudev-dev libturbojpeg0-dev ocl-icd-opencl-dev
 
+      # No libusb, and no libjpeg-turbo. Off Linux neither is a system library,
+      # and Homebrew's leave an absolute path in the shipped binary that only
+      # exists on the machine that built it. Both come from the copies the
+      # OrbbecSDK vendors instead -- see the libusb section of
+      # Backends/CMakeLists.txt.
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install ninja libusb jpeg-turbo
+        run: brew install ninja
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        run: |
-          choco install ninja -y --no-progress
-          # libfreenect and libfreenect2 talk to the Kinects over raw USB and
-          # have no Windows backend of their own.
-          vcpkg install libusb:x64-windows
+        run: choco install ninja -y --no-progress
 
       - name: Set up MSVC
         if: runner.os == 'Windows'
@@ -86,15 +87,10 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          extra=""
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            extra="-DCMAKE_TOOLCHAIN_FILE=$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows"
-          fi
-
           cmake -S . -B build -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
             -DSCORE_DEPTHCAM_BACKENDS_ONLY=1 \
-            ${{ matrix.config.flags }} $extra
+            ${{ matrix.config.flags }}
 
       - name: Build the package
         shell: bash
