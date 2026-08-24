@@ -153,7 +153,7 @@ jobs:
             build/depth-camera-stage/depth-camera "${{ matrix.config.expect }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: depth-camera-${{ matrix.config.arch }}
           path: build/depth-camera-${{ matrix.config.arch }}.zip
