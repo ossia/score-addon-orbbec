@@ -35,6 +35,16 @@ public:
 
   const std::vector<DeviceInfo>& devices() const noexcept { return m_devices; }
 
+  /// displayName() with a " - 2", " - 3" ... suffix where two connected
+  /// cameras would otherwise be called the same thing.
+  ///
+  /// Needed, not cosmetic: DeviceExplorerModel::checkDeviceInstantiatable
+  /// refuses a device whose name matches one already in the document, so two
+  /// identical cameras with identical names means the second cannot be added.
+  /// Numbered rather than disambiguated by serial because the name is meant to
+  /// stay short; the serial is in the uri, which is what identifies the camera.
+  QString uniqueName(const DeviceInfo& dev) const;
+
   /// Re-read every backend's device list and emit the difference. Metadata
   /// only: no camera is opened.
   void rescan();

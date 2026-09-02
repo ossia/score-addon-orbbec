@@ -42,15 +42,19 @@ jobs:
           - name: "Linux (x86_64)"
             os: ubuntu-22.04
             arch: linux-x86_64
-            expect: "orbbec freenect freenect2 k4a realsense"
+            expect: "orbbec freenect freenect2 k4a realsense oak depthai"
             flags: "-DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
 
           - name: "macOS (arm64)"
             os: macos-15
             arch: darwin-aarch64
             # No Azure Kinect: Microsoft never released an SDK for macOS, so the
-            # backend would build and then find nothing to load.
-            expect: "orbbec freenect freenect2 realsense"
+            # backend would build and then find nothing to load. No Oak either:
+            # Oak3DVision only ever published an x86_64 macOS binary, and the
+            # SDK is prebuilt, so there is nothing to recompile for arm64.
+            # depthai *is* here: it is built from source, and arm64 macOS is in
+            # Luxonis' own CI matrix.
+            expect: "orbbec freenect freenect2 realsense depthai"
             flags: "-DCMAKE_OSX_ARCHITECTURES=arm64 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
 
           - name: "Linux (aarch64)"
@@ -58,20 +62,24 @@ jobs:
             arch: linux-aarch64
             # No Azure Kinect: Microsoft's runtime is x86_64-only, so the
             # backend would build against the vendored headers and then have
-            # nothing to dlopen.
-            expect: "orbbec freenect freenect2 realsense"
+            # nothing to dlopen. Oak is here: Oak3DVision did publish an aarch64
+            # Linux build, and it is the one that needs no glfw or OpenCL.
+            expect: "orbbec freenect freenect2 realsense oak depthai"
             flags: "-DSCORE_DEPTHCAM_BUILD_K4A=OFF -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
 
           - name: "macOS (x86_64)"
             os: macos-15-intel
             arch: darwin-x86_64
-            expect: "orbbec freenect freenect2 realsense"
+            expect: "orbbec freenect freenect2 realsense oak depthai"
             flags: "-DCMAKE_OSX_ARCHITECTURES=x86_64 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON"
 
           - name: "Windows (x86_64)"
             os: windows-2022
             arch: windows-x86_64
-            expect: "orbbec freenect freenect2 k4a realsense"
+            # No Oak: the only Windows binary Oak3DVision ever shipped is
+            # 32-bit (pointcloud.dll and .lib are both machine 0x014c), so it
+            # cannot be linked into an x64 module at all.
+            expect: "orbbec freenect freenect2 k4a realsense depthai"
             # Stated rather than left to whatever the runner happens to have
             # installed. libfreenect2 links the OpenCL ICD loader outright, and
             # on Windows that is a file a GPU driver puts in System32 rather
@@ -85,7 +93,12 @@ jobs:
           - name: "Windows (arm64)"
             os: windows-11-arm
             arch: windows-aarch64
-            expect: "orbbec freenect freenect2 realsense"
+            # No Oak: Oak3DVision's only Windows binary is 32-bit x86.
+            # depthai *is* built: it comes from source, and vcpkg has a stock
+            # arm64-windows triplet. Luxonis does not test that combination, so
+            # this row is the thing most likely to go red first -- which is what
+            # `expect` exists for.
+            expect: "orbbec freenect freenect2 realsense depthai"
             flags: "-DSCORE_DEPTHCAM_BUILD_K4A=OFF -DSCORE_DEPTHCAM_FREENECT2_OPENCL=OFF"
             msvc_arch: arm64
 

@@ -12,12 +12,26 @@ explorer.
 | Kinect v1 (Xbox 360) | `freenect` | yes | yes | yes |
 | Azure Kinect DK | `k4a` | yes | yes | no² |
 | Intel RealSense D400/D500/L500/SR300 | `realsense` | yes | yes | yes |
+| Oak3DVision Oak CDK / QCDK | `oak` | yes | no³ | x86\_64 only³ |
+| Luxonis OAK-D / OAK-1 / OAK-4, all variants | `depthai` | yes | yes | yes |
 
 ¹ Femto Mega and Bolt compute depth with a proprietary depth engine that Orbbec
 does not ship for macOS, so those two have no depth or point cloud there. The
 Gemini and Astra lines compute depth on-device and are unaffected.
 
 ² Microsoft never released an Azure Kinect SDK for macOS.
+
+³ Oak3DVision ships `libPointCloud` only as prebuilt binaries, and only ever
+built four: Linux x86\_64, Linux aarch64, macOS x86\_64 and Windows **x86** —
+the last of which is 32-bit, so it cannot be linked into the 64-bit module score
+loads. There is nothing to recompile, so there is no Oak backend on Apple
+Silicon, and none on Windows at all. It also has runtime prerequisites the others do not — see
+[Oak3DVision cameras](#oak3dvision-cameras). Note that these are **not** the
+Luxonis OAK-D: the names collide, and those are a different camera on a
+different SDK. Luxonis cameras are the `depthai` backend, one row down.
+
+⁴ The Luxonis backend is the one that is not built alongside score even with the
+submodules checked out — see [Luxonis OAK cameras](#luxonis-oak-cameras).
 
 Orbbec Femto Mega also works over Ethernet — see [Connecting by address](#connecting-by-address).
 
@@ -42,20 +56,30 @@ depth-camera/
   score_depthcam_freenect2.so     Kinect v2
   score_depthcam_k4a.so           Azure Kinect DK
   score_depthcam_realsense.so     Intel RealSense
+  score_depthcam_oak.so           Oak3DVision Oak CDK / QCDK
+  score_depthcam_depthai.so       Luxonis OAK
   extensions/                     OrbbecSDK runtime blobs, loaded by path
+  libpointcloud.so                the Oak SDK, which ships as a binary
+  oak/plugin/, oak/conf/          its camera plug-ins and model descriptions
+  libdepthai-core.so              the Luxonis SDK, with the device firmware in it
   udev/                           the Linux rules, see below
 ```
 
-The whole thing is about 8 MB. One package rather than one per SDK: the
-backends are small, three of them need files sitting next to them, and plugging
-in a camera should not require working out which of five downloads yours is in.
+The whole thing is about 65 MB installed, roughly half of which is the Luxonis
+SDK with the MyriadX and RVC4 device firmware compiled into it. One package
+rather than one per SDK: plugging in a camera should not require working out
+which of seven downloads yours is in.
 
 After installing, **install the udev rules** (Linux only, see below) and restart
 score.
 
-Nothing else has to be set up — no `LD_LIBRARY_PATH`, no rpath. Each backend is
-a single file with no dependency on any SDK beside it, and it is given its own
-directory to find `extensions/` in.
+Nothing else has to be set up — no `LD_LIBRARY_PATH`, no rpath. Each backend
+resolves whatever sits beside it through `$ORIGIN`, and is given its own
+directory to find `extensions/` and the Oak SDK's `oak/` tree in.
+
+The one backend that is not self-contained is `oak`: Oak3DVision publishes
+`libPointCloud` as a binary rather than as sources, and it brings dependencies
+of its own. See [Oak3DVision cameras](#oak3dvision-cameras).
 
 ### Linux: udev rules are not optional
 
@@ -122,6 +146,129 @@ mysteriously absent:
            or place libk4a and libdepthengine next to this backend.
 ```
 
+### Oak3DVision cameras
+
+The **Oak CDK** (`14b4:9108`) and **Oak QCDK** (`14b4:9107`) are time-of-flight
+modules with an illuminator and no colour sensor, so they offer `depth`, `ir`
+and `pointcloud` and nothing else. The `ir` node carries the ToF amplitude
+image, which is what the sensor measured of its own returning light; ask for a
+coloured point cloud and you get that amplitude as grey.
+
+> These are **not** the Luxonis OAK-D. The names collide. OAK-D, OAK-D-Lite and
+> OAK-D-Pro are stereo-depth cameras driven by
+> [`depthai-core`](https://github.com/luxonis/depthai-core), and none of them is
+> reachable through this backend.
+
+Unlike every other SDK here, `libPointCloud` is not built from source —
+Oak3DVision publishes none. Their repository *is* the binary distribution, so
+this backend links the prebuilt library for the platform being built and ships
+it, its camera plug-ins and its `.conf`/`.dml` model descriptions in the
+package. Two things follow from that.
+
+**There is no Oak backend on Apple Silicon, and none on Windows.** Oak3DVision
+built four binaries — Linux x86\_64, Linux aarch64, macOS x86\_64 and Windows
+**x86**. That last one is 32-bit (`pointcloud.dll` and `pointcloud.lib` are both
+machine type `0x014c`), so it cannot link into the 64-bit module score loads;
+linking it against x64 gives "library machine type 'x86' conflicts with target
+machine type 'x64'" and 23 unresolved externals. There is nothing to recompile.
+
+**The vendor's binary brings its own dependencies**, which the rest of the
+package deliberately does not have:
+
+| | needs |
+|---|---|
+| Linux x86\_64 | `libglfw3`, `libgl1`, `ocl-icd-libopencl1` |
+| Linux aarch64 | nothing beyond libusb |
+| macOS | `OpenCL.framework` (part of the OS) |
+| Windows | the **Visual C++ redistributable**, and `OpenCL.dll` from a graphics driver |
+
+On Debian and Ubuntu:
+
+```sh
+sudo apt install libglfw3 libgl1 ocl-icd-libopencl1
+```
+
+If they are missing, only this backend is affected — the module fails to load,
+score logs it, and every other camera keeps working:
+
+```
+[depthcam] could not load .../score_depthcam_oak.so:
+           libglfw.so.3: cannot open shared object file
+```
+
+The Windows failures are reported through the backend instead, as a sentence in
+the log, because `pointcloud.dll` is delay-loaded there on purpose.
+
+Camera settings are a curated list rather than everything the SDK offers: the
+MLX75027's register map alone is 307 raw fields, most of them meaningless
+outside the vendor's bring-up tool, and several will stop the sensor if written.
+Set `SCORE_DEPTHCAM_OAK_ALL_CONTROLS=1` to publish all of them under
+`advanced/`. See `Backends/Oak/README.md`, which also lists what has and has not
+been tried on hardware.
+
+### Luxonis OAK cameras
+
+The whole OAK range, RVC2 and RVC4 alike: OAK-D and its variants (Lite, S2, Pro,
+W, SR, LR), the OAK-1 mono models, the PoE versions over Ethernet, and the OAK-4
+generation. Colour, infrared, depth, point cloud and — on the models that have
+one — the inertial sensor.
+
+Which of those a given camera can actually deliver is not assumed. An OAK-1 has
+no depth; most OAKs have no IMU; only some have an illumination projector. The
+backend reports what it actually wired up, so score does not publish nodes that
+nothing will ever fill in.
+
+Depth comes from depthai's unified `Depth` node with `Algorithm::AUTO`, which
+picks stereo matching, on-sensor time-of-flight, or on-device neural depth from
+what the camera in front of it has. That is deliberate and is what makes one
+backend cover the range: hand-wiring `StereoDepth`, which is what most depthai
+examples do, works on an OAK-D and produces nothing at all on an OAK-D-SR-PoE.
+
+Two settings are worth knowing about:
+
+- **`depth/laser_power`** — the structured-light dot projector, on an OAK-D-Pro
+  and friends. It is **off by default** and it is what makes depth work on a
+  blank wall. If depth looks empty on a plain surface, this is the first thing
+  to turn up.
+- **`ir/flood_light`** — the infrared floodlight, on the same models.
+
+Both are published only where `getIrDrivers()` reports the hardware, so they do
+not appear on a camera that has none.
+
+**Telemetry is turned off.** depthai-core reports anonymised usage to Luxonis
+unless told otherwise, and it would be doing that from inside a media
+application you never pointed at the internet. The backend sets
+`DEPTHAI_TELEMETRY=0` — but only if you have not set it yourself, so an explicit
+`DEPTHAI_TELEMETRY=1` is respected as the opt-in it is.
+
+**It is the one backend not built alongside score.** Every other SDK here is
+cheap enough that compiling it next to score costs nothing anyone notices; this
+one bootstraps a vcpkg, builds twenty dependencies before it builds itself, is
+the only SDK here that needs the network at build time, and leaves about a
+gigabyte of build tree behind. So it is on by
+default *only* in a backends-only build — the one that produces the package —
+and a developer who cloned this repository recursively does not turn every score
+build into a vcpkg bootstrap. Pass `-DSCORE_DEPTHCAM_BUILD_DEPTHAI=ON` to work
+on it.
+
+**Not under msys2.** depthai resolves its dependencies through vcpkg, which
+picks its triplet from the host platform rather than from the compiler: on
+Windows that is always an MSVC triplet, and the libraries it produces cannot be
+linked into a mingw module. A mingw build skips this backend and says so; build
+it with MSVC.
+
+**Not in a universal macOS binary**, for the same reason — a vcpkg triplet names
+one architecture. A fat `x86_64` + `x86_64h` build is fine, because that is one
+architecture in two flavours; Intel and Apple Silicon in one binary is not, and
+is skipped with a message rather than failing the build.
+
+**On Windows with MSVC it needs the Visual C++ redistributable**, alone in this
+package.
+depthai's vcpkg triplet builds against the dynamic CRT, so the backend has to
+match it — `std::shared_ptr`s allocated inside `depthai-core.dll` are released
+here, and two CRTs would free them against the wrong heap. If it is missing, the
+backend says so in the log instead of quietly not appearing.
+
 ### USB 3 is required for several cameras
 
 The Azure Kinect DK, Kinect v2 and RealSense D400 series all need USB 3.
@@ -154,8 +301,8 @@ The device exposes one child node per enabled stream:
 
 | Node | Type | Notes |
 |---|---|---|
-| `rgb` | texture | |
-| `ir` | texture | not offered by Kinect v1, which can stream IR only *instead of* colour |
+| `rgb` | texture | the Oak CDK/QCDK have no colour sensor and do not offer it |
+| `ir` | texture | not offered by Kinect v1, which can stream IR only *instead of* colour; on a ToF camera this is the amplitude image |
 | `depth` | texture | 16-bit; the shader rescales using the unit the camera reports |
 | `pointcloud` | geometry | connect to *Model Display* or any geometry input |
 | `imu/accel` | vec3f | acceleration in m/s², including gravity; off by default |
@@ -171,6 +318,11 @@ A Femto Mega with an Ethernet port shows up in the browser like any other
 camera, alongside the USB ones, with `Ethernet` as its transport. There is
 nothing to configure: the SDK broadcasts a GVCP discovery request on every
 interface and lists whatever answers.
+
+A Luxonis OAK PoE is the same, and the **Network** checkbox now covers both:
+pick the family beside it, since the two are addressed differently — an Orbbec
+takes a host and a port, an OAK takes a host alone (XLink's port is fixed), so
+the port field is only enabled for Orbbec.
 
 **If no network camera appears, suspect your firewall before the camera.** The
 cameras reply to `255.255.255.255`, not to the host that asked — the firmware
@@ -388,9 +540,20 @@ git clone --recursive https://github.com/jcelerier/score-addon-orbbec
 
 The plug-in and the backends build independently. A checkout **without**
 submodules builds the plug-in alone — which is a complete, working device that
-says "no camera backend is installed" until a package is — and that is what
-score's own CI does, because cloning this repository recursively pulls four
-camera SDKs that take longer to build than the rest of score.
+says "no camera backend is installed" until a package is.
+
+That is exactly what score does with this repository. `src/addons/*` is
+gitignored there and the add-ons are cloned by `ci/common.deps.sh`, where this
+one is the entry that carries `NO_SUBMODULES=1`:
+
+```sh
+NO_SUBMODULES=1 clone_addon https://github.com/ossia/score-addon-orbbec
+```
+
+so score gets the top level and none of the six vendored SDKs, which together
+take longer to build than the rest of score — depthai alone bootstraps a vcpkg
+and needs the network. That one word is what keeps the two halves apart; drop it
+and every score build starts building camera SDKs.
 
 ```
 -DSCORE_DEPTHCAM_BUILD_BACKENDS=OFF   # plug-in only; the default with no submodules
@@ -406,9 +569,44 @@ turned off:
 -DSCORE_DEPTHCAM_BUILD_FREENECT2=OFF
 -DSCORE_DEPTHCAM_BUILD_K4A=OFF          # off by default on macOS: no SDK exists there
 -DSCORE_DEPTHCAM_BUILD_REALSENSE=OFF
+-DSCORE_DEPTHCAM_BUILD_OAK=OFF          # off where Oak3DVision shipped no binary
+-DSCORE_DEPTHCAM_BUILD_DEPTHAI=ON       # OFF unless SCORE_DEPTHCAM_BACKENDS_ONLY; see below
 -DSCORE_DEPTHCAM_FREENECT2_OPENCL=ON    # Kinect v2 GPU depth pipeline, on by default
 -DSCORE_DEPTHCAM_ORBBEC_STATIC=ON       # build the OrbbecSDK into the backend
 ```
+
+`SCORE_DEPTHCAM_BUILD_DEPTHAI` is the odd one out: it defaults **off** unless
+`SCORE_DEPTHCAM_BACKENDS_ONLY` is set, so it is built when the package is what
+was asked for and not when you happen to have the submodules checked out. It is
+a nested CMake project that bootstraps a vcpkg, it dominates the build time of
+this repository, and its build tree is about a gigabyte in `CMAKE_BINARY_DIR` —
+which, inside a score build, is score's own build directory. Pass `=ON` to work
+on that backend.
+
+### macOS architectures, and msys2
+
+The plug-in half builds anywhere score does. For the backends:
+
+| `CMAKE_OSX_ARCHITECTURES` | package key | Oak | Luxonis |
+|---|---|---|---|
+| `arm64` | `darwin-aarch64` | no¹ | yes |
+| `x86_64` | `darwin-x86_64` | yes | yes |
+| `x86_64h` | `darwin-x86_64` | yes | yes |
+| `x86_64;x86_64h` | `darwin-x86_64` | yes | yes |
+| `x86_64;arm64` | — | no¹ | no² |
+
+¹ Oak3DVision shipped no arm64 macOS binary. ² vcpkg builds one architecture at
+a time. `x86_64h` is a flavour of `x86_64`, not an architecture of its own, so a
+fat binary of the two is one package key and one vcpkg build; only a genuine
+Intel + Apple Silicon universal binary is unpublishable, and that configuration
+is an error **only** when a package is what was asked for
+(`SCORE_DEPTHCAM_BACKENDS_ONLY`) — an ordinary universal score build carries on.
+
+On Windows the tree builds under MSVC and under msys2 (`mingw64`, `ucrt64` and
+`clang64` all verified). Neither of the two newest backends is available under
+msys2 — Oak's vendor binary is 32-bit MSVC, and depthai needs an MSVC vcpkg
+triplet — so both skip themselves with a message and the rest builds normally.
+Every MSVC-only flag in this tree is guarded on `MSVC`, not on `WIN32`.
 
 ### Building the package on its own
 
@@ -434,6 +632,28 @@ working score build on it, in minutes rather than hours.
 | libjpeg-turbo | system (`libturbojpeg0-dev`) | vendored, static | vendored, static |
 | OpenCL (Kinect v2 depth) | system (`ocl-icd-opencl-dev`), optional | — | — |
 | udev | system (`libudev-dev`) | — | — |
+| libPointCloud (Oak) | vendored, prebuilt | vendored, prebuilt | vendored, prebuilt |
+| depthai-core (Luxonis) | built from source¹ | built from source¹ | built from source¹ |
+
+The Oak SDK is the odd one out: it is a submodule of *binaries* rather than
+sources, so nothing needs installing to build it — but its own dependencies do
+have to be present at **run** time, on the user's machine rather than the
+builder's. See [Oak3DVision cameras](#oak3dvision-cameras).
+
+¹ Only in a backends-only build; see `SCORE_DEPTHCAM_BUILD_DEPTHAI` above.
+
+depthai-core is the odd one out in the other direction. It is built as a nested
+CMake project, because it resolves its dependencies through a vcpkg it
+bootstraps itself and that has to be the toolchain of the top-level configure —
+so `add_subdirectory` cannot reach it, and its own documentation says as much.
+Nothing has to be installed for it either, but two things follow:
+
+- it is **by far the longest build here** (vcpkg, its dependencies, then ~260
+  translation units of depthai), so `-DSCORE_DEPTHCAM_BUILD_DEPTHAI=OFF` is
+  worth knowing about when you are iterating on something else;
+- alone among the SDKs, it **needs the network at build time** — for vcpkg, and
+  for the MyriadX and RVC4 device firmware it compiles into the library. Every
+  other submodule here builds offline.
 
 The vendored copies are the OrbbecSDK's, which already carries libusb 1.0.26
 and libjpeg-turbo and builds both for winusb and darwin_usb.
@@ -532,7 +752,32 @@ The Windows package is built against the **static** CRT. A backend built `/MD`
 imports `MSVCP140.dll` and will not load without the Visual C++ redistributable,
 which score — built with llvm-mingw — does not bring. A CRT per module is what
 the ABI already assumes anyway: nothing but plain C crosses it, and every frame
-goes back through the backend's own `release()`.
+goes back through the backend's own `release()`. The Oak backend is the one
+exception, and has to be: it links a prebuilt DLL that imports `MSVCP140.dll`
+and hands `std::vector`s across, so a second CRT would free an allocation
+against the wrong heap on the first enumeration. That is why the Oak backend
+alone requires the redistributable.
+
+One more consequence of the one-symbol rule is worth knowing before writing a
+backend that links a **C++** SDK: a module that exports one symbol exports no
+type information either, so its copy of a type's RTTI cannot be merged with the
+SDK's. On Linux and Windows `dynamic_cast` survives that, because both compare
+`type_info` by name. On x86\_64 macOS libc++ compares it by *address*, on the
+assumption that the linker merged every copy — so every `dynamic_cast` across
+the boundary silently returns null. The Oak backend is the only one that links a
+C++ SDK, and it works around this by going through the SDK's own casts and by
+keying frame handling on the frame type rather than on RTTI; see the comments
+in `Backends/Oak/OakBackend.cpp`.
+
+Not every SDK can be built the way the others are, and the two most recent
+additions each break the rule differently. Oak3DVision publishes no sources at
+all, so `3rdparty/oaksdk` is a submodule of *binaries* and the backend links the
+one for the platform. depthai-core is built, but as a **nested CMake project**:
+it resolves its dependencies through a vcpkg it bootstraps itself, and vcpkg has
+to be the toolchain file of the top-level configure, which `add_subdirectory`
+cannot reach — its documentation says as much. Both still meet the part that
+matters: one shared object, one exported symbol, reached only through
+`depthcam_abi.h`.
 
 Writing a backend for another camera means implementing one header. Nothing on
 the score side is camera-specific.
@@ -563,3 +808,6 @@ here; see `Documentation/sdk-forks.md`.
 | librealsense | Apache-2.0 | yes |
 | Azure Kinect Sensor SDK | MIT | yes |
 | `libdepthengine` | Microsoft proprietary | **no — not shipped** |
+| Oak3DVision `libPointCloud` | none stated | **check before shipping** |
+| depthai-core | MIT | yes |
+| MyriadX / RVC4 device firmware | Luxonis, see the LICENSE it ships | as depthai-core does |

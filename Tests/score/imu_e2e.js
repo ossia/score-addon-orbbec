@@ -22,13 +22,19 @@ var REPORT = "/tmp/imu_report.txt";
 
 // Which backends have inertial sensors at all. libfreenect2 has none; a Kinect
 // v1's accelerometer is on the motor board, which is opt-in and refused
-// outright by a model 1473.
+// outright by a model 1473; the Oak CDK/QCDK are bare time-of-flight modules
+// with no inertial unit of any kind.
 var BACKENDS = [
   { uri: "orbbec:",    imu: true  },
   { uri: "realsense:", imu: true  },
   { uri: "k4a:",       imu: true  },
   { uri: "freenect2:", imu: false },
   { uri: "freenect:",  imu: false },
+  { uri: "oak:",       imu: false },
+  // Luxonis: an OAK-D-Pro or OAK-D-S2 has a BNO086, a plain OAK-D-Lite does
+  // not. The backend reports which through active_streams(), so this row only
+  // says the family can have one.
+  { uri: "depthai:",   imu: true  },
 ];
 
 var out = [];

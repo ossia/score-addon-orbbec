@@ -10,11 +10,19 @@
 ###    vendored submodules and shipped as a downloadable package.
 ###
 ### score's own CI wants only the first: cloning this repository recursively
-### pulls the OrbbecSDK, libfreenect, libfreenect2 and librealsense, and
-### building them takes longer than the rest of score put together. So a
-### checkout without submodules builds the plug-in and nothing else -- which is
-### a complete, working device that reports "no camera backend is installed"
-### until a package is.
+### pulls the OrbbecSDK, libfreenect, libfreenect2, librealsense, the
+### Oak3DVision SDK and depthai-core, and building them takes longer than the
+### rest of score put together -- depthai alone bootstraps a vcpkg and builds a
+### dependency tree before it builds itself. So a checkout without submodules builds the plug-in and nothing
+### else -- which is a complete, working device that reports "no camera backend
+### is installed" until a package is.
+###
+### 3rdparty/oaksdk is vendored *binaries*: Oak3DVision publishes no sources for
+### libPointCloud, so nothing there is compiled. See Backends/Oak/README.md.
+###
+### 3rdparty/depthai-core is built, but as a nested CMake project rather than
+### with add_subdirectory, and is the only SDK here that needs the network at
+### build time. See Backends/DepthAI/README.md.
 cmake_minimum_required(VERSION 3.25 FATAL_ERROR)
 
 if(NOT (WIN32 OR APPLE OR LINUX))
@@ -196,6 +204,27 @@ set(SCORE_DEPTHCAM_PACKAGE_NAME "depth-camera")
 set(SCORE_DEPTHCAM_BACKEND_DIR
     "${CMAKE_BINARY_DIR}/${SCORE_DEPTHCAM_PACKAGE_NAME}" CACHE INTERNAL "")
 
+### Normalised to the keys score publishes under before anything is decided.
+### x86_64h is a flavour of x86_64, not an architecture of its own, so a fat
+### x86_64 + x86_64h binary is two slices but one package key; only a genuinely
+### mixed Intel/Apple Silicon build has no key to publish under.
+set(_depthcam_cpu "${CMAKE_SYSTEM_PROCESSOR}")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+  set(_depthcam_keys "")
+  foreach(_a ${CMAKE_OSX_ARCHITECTURES})
+    if(_a MATCHES "^(x86_64|x86_64h|amd64)$")
+      list(APPEND _depthcam_keys "x86_64")
+    elseif(_a MATCHES "^(arm64|arm64e|aarch64)$")
+      list(APPEND _depthcam_keys "aarch64")
+    else()
+      list(APPEND _depthcam_keys "${_a}")
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES _depthcam_keys)
+  list(LENGTH _depthcam_keys _n_arch)
+  set(CMAKE_OSX_ARCHITECTURES_KEYS "${_depthcam_keys}")
+endif()
+
 add_subdirectory(Backends)
 
 ### The manifest score writes after installing a package, generated here so the
@@ -216,15 +245,22 @@ endif()
 # the truth about a cross build: CMAKE_SYSTEM_PROCESSOR stays the *host's*, so
 # an x86_64 package built on an Apple Silicon machine would otherwise be named
 # darwin-aarch64 and hand an Intel score a set of arm64 binaries.
-set(_depthcam_cpu "${CMAKE_SYSTEM_PROCESSOR}")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
-  list(LENGTH CMAKE_OSX_ARCHITECTURES _n_arch)
   if(_n_arch GREATER 1)
-    message(FATAL_ERROR
-      "score-addon-orbbec: a universal binary has no single architecture key to "
-      "publish under. Build one package per architecture.")
+    ### The *package* cannot be named, but the build is legitimate and score is
+    ### built that way. Fatal only when a package was what was asked for.
+    if(SCORE_DEPTHCAM_BACKENDS_ONLY)
+      message(FATAL_ERROR
+        "score-addon-orbbec: a universal binary has no single architecture key "
+        "to publish under. Build one package per architecture.")
+    endif()
+    list(GET _depthcam_keys 0 _depthcam_cpu)
+    message(STATUS
+      "score-addon-orbbec: universal build (${CMAKE_OSX_ARCHITECTURES}); the "
+      "package manifest is not publishable and says ${_depthcam_cpu}")
+  else()
+    set(_depthcam_cpu "${_depthcam_keys}")
   endif()
-  set(_depthcam_cpu "${CMAKE_OSX_ARCHITECTURES}")
 endif()
 
 if(_depthcam_cpu MATCHES "^(aarch64|arm64|ARM64)$")

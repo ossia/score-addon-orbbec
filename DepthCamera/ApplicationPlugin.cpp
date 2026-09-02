@@ -59,14 +59,27 @@ bool DeviceInfo::network() const noexcept
 
 QString DeviceInfo::displayName() const
 {
-  QString n = name;
-  n.remove(QStringLiteral("orbbec "), Qt::CaseInsensitive);
-  if(n.isEmpty())
-    n = backend.isEmpty() ? QStringLiteral("Camera") : backend;
+  // The model, and nothing else: the browser groups by vendor already, and the
+  // serial belongs in the uri, which is what actually identifies the camera.
+  if(name.isEmpty())
+    return backend.isEmpty() ? QStringLiteral("Camera") : backend;
+  return name;
+}
 
-  if(!serial.isEmpty())
-    return QStringLiteral("%1 (%2)").arg(n, serial);
-  return n;
+QString ApplicationPlugin::uniqueName(const DeviceInfo& dev) const
+{
+  const QString base = dev.displayName();
+
+  int seen = 0;
+  for(const auto& other : m_devices)
+  {
+    if(other.uri == dev.uri)
+      break;
+    if(other.displayName() == base)
+      seen++;
+  }
+
+  return seen == 0 ? base : QStringLiteral("%1 - %2").arg(base).arg(seen + 1);
 }
 
 ApplicationPlugin::ApplicationPlugin(const score::GUIApplicationContext& ctx)

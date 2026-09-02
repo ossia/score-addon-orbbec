@@ -62,7 +62,10 @@ for f in "$DIR"/score_depthcam_*."$EXT"; do
   case "$EXT" in
     so)    syms=$(nm -D --defined-only "$f" | wc -l) ;;
     # Apple's nm is llvm-nm: -g is external symbols, -U is --defined-only.
-    dylib) syms=$(nm -gU "$f" 2>/dev/null | wc -l) ;;
+    # Distinct symbol names, not lines: on a universal binary nm reports each
+    # slice in turn with a header and a blank line, so a correct fat module
+    # with one export per slice would count as six lines.
+    dylib) syms=$(nm -gU "$f" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u | wc -l) ;;
     dll)
       command -v dumpbin >/dev/null || { echo "  --    $(basename "$f"): no dumpbin, exports unchecked"; continue; }
       # dumpbin's export rows are "ordinal hint RVA name" and nothing else in

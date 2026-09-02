@@ -75,7 +75,7 @@ from the GUI thread — and it is the one to run after touching
 ## Sanitizers
 
 `build-asan-ubsan` (clang, `-fsanitize=address,undefined,integer`) builds the
-plug-in and all five backends. The harnesses have to be built with the same
+plug-in and all seven backends. The harnesses have to be built with the same
 flags — ASan's runtime must come first in the initial library list, and a plain
 executable that `dlopen`s an instrumented backend aborts with *"ASan runtime
 does not come first"*. `Tests/abi/asan_run.sh` does both and reports per test.
@@ -90,10 +90,17 @@ the one configuration that runs.
 
 **Most of what a sanitizer reports here belongs to the vendored SDKs.** Filter
 by path before reading anything into it: `librealsense`, `libjpeg`, `libusb`,
-`libfreenect`, `libfreenect2`, and libstdc++ itself under `-fsanitize=integer`
-(which flags the `0 - 1` in every `std::string` and `std::vector` internal,
-where unsigned wraparound is defined and intended). A run that reports nothing
-in `DepthCamera/` or `Backends/*/` is the outcome to want.
+`libfreenect`, `libfreenect2`, `libpointcloud`, `libdepthai-core`, and
+libstdc++ itself under
+`-fsanitize=integer` (which flags the `0 - 1` in every `std::string` and
+`std::vector` internal, where unsigned wraparound is defined and intended). A
+run that reports nothing in `DepthCamera/` or `Backends/*/` is the outcome to
+want.
+
+`libpointcloud` is worse than the others here and cannot be improved: it is a
+prebuilt binary, so it is neither instrumented nor rebuildable, and everything
+ASan can say about it is a shadow-less report from a stripped frame. Findings
+inside the Oak backend's own translation unit still count.
 
 ### Check the tests actually ran
 

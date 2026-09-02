@@ -29,7 +29,12 @@ class InputDevice final : public Gfx::GfxInputDevice
 {
   W_OBJECT(InputDevice)
 public:
-  using GfxInputDevice::GfxInputDevice;
+  InputDevice(const Device::DeviceSettings& settings, const score::DocumentContext& ctx)
+      : GfxInputDevice{settings, ctx}
+  {
+    // Depth cameras expose a point cloud next to their image streams
+    m_capas.nodeKinds |= Device::NodeKind::GeometryIn;
+  }
   ~InputDevice();
 
 private:
@@ -229,8 +234,9 @@ public:
         [this](const DeviceInfo& dev) {
       if(dev.backend != m_backend)
         return;
-      m_names[dev.uri] = dev.displayName();
-      deviceAdded(dev.displayName(), settingsFor(dev));
+      const auto name = m_plugin.uniqueName(dev);
+      m_names[dev.uri] = name;
+      deviceAdded(name, settingsFor(dev));
     });
 
     connect(
@@ -248,7 +254,7 @@ public:
   Device::DeviceSettings settingsFor(const DeviceInfo& dev) const
   {
     Device::DeviceSettings set;
-    set.name = dev.displayName();
+    set.name = m_plugin.uniqueName(dev);
     set.protocol = InputFactory::static_concreteKey();
 
     DepthCameraSettings specif;
@@ -264,8 +270,9 @@ public:
     {
       if(dev.backend != m_backend)
         continue;
-      const_cast<DepthCameraEnumerator*>(this)->m_names[dev.uri] = dev.displayName();
-      f(dev.displayName(), settingsFor(dev));
+      const auto name = m_plugin.uniqueName(dev);
+      const_cast<DepthCameraEnumerator*>(this)->m_names[dev.uri] = name;
+      f(name, settingsFor(dev));
     }
   }
 
@@ -322,6 +329,16 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
   // a broadcast regardless. Either way, typing the address is the way in.
   {
     m_network = new QCheckBox{tr("Network"), this};
+
+    // Two camera families are reachable over the network and they are addressed
+    // differently: an Orbbec Femto Mega speaks GVCP on a port, a Luxonis OAK
+    // PoE is reached by address alone over XLink. The uri grammar differs with
+    // it, so the family has to be picked rather than guessed.
+    m_networkKind = new QComboBox{this};
+    m_networkKind->addItem(tr("Orbbec"), QStringLiteral("orbbec"));
+    m_networkKind->addItem(tr("Luxonis OAK"), QStringLiteral("depthai"));
+    m_networkKind->setMaximumWidth(130);
+
     m_networkHost = new QLineEdit{this};
     m_networkHost->setPlaceholderText(tr("192.168.0.12"));
     m_networkPort = new QSpinBox{this};
@@ -334,6 +351,7 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
     auto h = new QHBoxLayout{row};
     h->setContentsMargins(0, 0, 0, 0);
     h->addWidget(m_network);
+    h->addWidget(m_networkKind);
     h->addWidget(m_networkHost, 1);
     h->addWidget(m_networkPort);
     layout->addRow(row);
@@ -344,6 +362,12 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
   checkForChanges(m_networkPort);
 
   connect(m_network, &QCheckBox::toggled, this, [this] { updateEnabledState(); });
+  connect(
+      m_networkKind, &QComboBox::currentIndexChanged, this,
+      [this] { updateEnabledState(); });
+  connect(
+      m_networkKind, &QComboBox::currentIndexChanged, this,
+      &Device::ProtocolSettingsWidget::changed);
   connect(
       m_networkHost, &QLineEdit::textChanged, this, [this] { updateEnabledState(); });
   connect(
@@ -464,6 +488,9 @@ QString InputSettingsWidget::currentAddress() const
   // address reads as the port separator.
   const auto quoted
       = host.contains(':') && !host.startsWith('[') ? "[" + host + "]" : host;
+  if(m_networkKind->currentData().toString() == QLatin1String("depthai"))
+    return QStringLiteral("depthai:ip:%1").arg(host);
+
   return QStringLiteral("orbbec:net:%1:%2").arg(quoted).arg(m_networkPort->value());
 }
 
@@ -473,6 +500,11 @@ void InputSettingsWidget::updateEnabledState()
   // from it, so showing the result read-only is clearer than leaving a second
   // editable copy that silently loses.
   const bool net = m_network->isChecked();
+  m_networkKind->setEnabled(net);
+  m_networkHost->setEnabled(net);
+  // XLink has no configurable port; only the Orbbec grammar carries one.
+  m_networkPort->setEnabled(
+      net && m_networkKind->currentData().toString() == QLatin1String("orbbec"));
   m_address->setReadOnly(net);
   if(net)
     m_address->setText(currentAddress());
@@ -561,8 +593,21 @@ void InputSettingsWidget::setSettings(const Device::DeviceSettings& settings)
     if(!host.isEmpty())
     {
       m_network->setChecked(true);
+      if(const int i = m_networkKind->findData(QStringLiteral("orbbec")); i >= 0)
+        m_networkKind->setCurrentIndex(i);
       m_networkHost->setText(host);
       m_networkPort->setValue(port);
+    }
+  }
+  else if(static const QString ip{"depthai:ip:"}; set.device.startsWith(ip))
+  {
+    // No port to recover: XLink's is fixed.
+    if(const auto host = set.device.mid(ip.size()); !host.isEmpty())
+    {
+      m_network->setChecked(true);
+      if(const int i = m_networkKind->findData(QStringLiteral("depthai")); i >= 0)
+        m_networkKind->setCurrentIndex(i);
+      m_networkHost->setText(host);
     }
   }
   m_rgb->setChecked(set.rgb);

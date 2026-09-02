@@ -1,0 +1,25 @@
+# Luxonis OAK — udev rules for the score depth-camera backend.
+#
+# depthai-core talks to the camera over raw USB through XLink, so without these
+# the device nodes stay root-owned, discovery returns nothing, and the symptom
+# is indistinguishable from nothing being plugged in.
+#
+# 03e7 is Movidius, the vendor id every OAK enumerates under. It covers both
+# states an OAK passes through, and that is why the rule is vendor-wide rather
+# than per-product: an unbooted device shows one product id (2485, the ROM
+# bootloader) and a running one another (f63b), so a product-specific rule
+# grants access to a camera that has already been opened and not to the one you
+# are trying to open. Luxonis' own 80-movidius.rules is vendor-wide for the
+# same reason.
+#
+# Ethernet models need no rule at all — they are reached over TCP, not USB.
+#
+# Deliberately no ACTION!="add" guard: `udevadm trigger` fires *change* events
+# by default, so an add-only rule silently does nothing until the camera is
+# physically replugged.
+
+SUBSYSTEM!="usb", GOTO="score_depthai_end"
+
+ATTR{idVendor}=="03e7", MODE="0666", TAG+="uaccess"
+
+LABEL="score_depthai_end"

@@ -65,6 +65,7 @@ private:
   /// address has to be a first-class way in, not a URI the user has to know the
   /// syntax of.
   QCheckBox* m_network{};
+  QComboBox* m_networkKind{};
   QLineEdit* m_networkHost{};
   QSpinBox* m_networkPort{};
 

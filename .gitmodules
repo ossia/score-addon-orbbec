@@ -10,3 +10,9 @@
 [submodule "3rdparty/librealsense"]
 	path = 3rdparty/librealsense
 	url = https://github.com/jcelerier/librealsense
+[submodule "3rdparty/oaksdk"]
+	path = 3rdparty/oaksdk
+	url = https://github.com/oak3dvision/oaksdk
+[submodule "3rdparty/depthai-core"]
+	path = 3rdparty/depthai-core
+	url = https://github.com/luxonis/depthai-core

@@ -16,10 +16,25 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace
 {
+
+/// The device browser groups by vendor already, so the model alone is enough
+/// and keeps the name short. Case-insensitive: the SDKs are not consistent.
+std::string strip_vendor(std::string name, std::string_view prefix)
+{
+  if(name.size() > prefix.size()
+     && std::equal(
+         prefix.begin(), prefix.end(), name.begin(), [](char a, char b) {
+    return std::tolower(static_cast<unsigned char>(a))
+           == std::tolower(static_cast<unsigned char>(b));
+  }))
+    name.erase(0, prefix.size());
+  return name;
+}
 std::string g_last_error;
 std::mutex g_error_mutex;
 
@@ -688,7 +703,7 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
     {
       EnumEntry e;
       e.serial = info_of(d, RS2_CAMERA_INFO_SERIAL_NUMBER);
-      e.name = info_of(d, RS2_CAMERA_INFO_NAME);
+      e.name = strip_vendor(info_of(d, RS2_CAMERA_INFO_NAME), "Intel RealSense ");
       e.transport = info_of(d, RS2_CAMERA_INFO_USB_TYPE_DESCRIPTOR);
       if(e.name.empty())
         e.name = "RealSense";

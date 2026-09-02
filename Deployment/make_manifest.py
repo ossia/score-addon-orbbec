@@ -46,7 +46,7 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--template", default=os.path.join(HERE, "package.json.in"))
     ap.add_argument(
-        "--size", default="35M", help="approximate installed size, shown in the UI"
+        "--size", default="70M", help="approximate installed size, shown in the UI"
     )
     ap.add_argument(
         "--only",

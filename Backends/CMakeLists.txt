@@ -561,6 +561,349 @@ if(SCORE_DEPTHCAM_BUILD_REALSENSE
   endif()
 endif()
 
+### --- Oak3DVision Oak CDK / QCDK (libPointCloud) ---------------------------
+###
+### Nothing to compile: Oak3DVision publishes no sources, so 3rdparty/oaksdk is
+### a submodule of vendored binaries. That fixes the platform list at whatever
+### they built in 2020 -- Linux x86_64, Linux aarch64, macOS x86_64, Windows x86
+### -- and the backend is skipped elsewhere. See Oak/README.md.
+set(_oak_platform "")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(_oak_platform "ubuntu_arm")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    set(_oak_platform "ubuntu")
+  endif()
+elseif(APPLE)
+  # CMAKE_OSX_ARCHITECTURES first: on a cross build CMAKE_SYSTEM_PROCESSOR stays
+  # the host's. It is a list, and the vendor's dylib is x86_64 only, so it can
+  # only be linked when every requested slice is x86_64 -- x86_64h included,
+  # which a generic x86_64 dylib links into fine.
+  set(_oak_cpus "${CMAKE_SYSTEM_PROCESSOR}")
+  if(CMAKE_OSX_ARCHITECTURES)
+    set(_oak_cpus "${CMAKE_OSX_ARCHITECTURES}")
+  endif()
+  set(_oak_all_x86 ON)
+  foreach(_cpu ${_oak_cpus})
+    if(NOT _cpu MATCHES "^(x86_64|x86_64h|amd64)$")
+      set(_oak_all_x86 OFF)
+    endif()
+  endforeach()
+  if(_oak_cpus AND _oak_all_x86)
+    set(_oak_platform "macos")
+  endif()
+elseif(WIN32)
+  # The Windows binary is 32-bit -- pointcloud.dll and .lib both carry machine
+  # type 0x014c -- so in practice there is no Oak backend on Windows, since
+  # score has not shipped an i386 build for years.
+  #
+  # MSVC only: the DLL exports mangled C++ methods and passes std::string and
+  # std::vector across the boundary, which a mingw build cannot match.
+  if(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 4
+     AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86|X86|i[36]86)$")
+    set(_oak_platform "windows")
+  endif()
+endif()
+
+option(SCORE_DEPTHCAM_BUILD_OAK "Build the Oak3DVision backend" ON)
+
+if(SCORE_DEPTHCAM_BUILD_OAK AND _oak_platform
+   AND EXISTS "${SCORE_DEPTHCAM_SDK_DIR}/oaksdk/libs/${_oak_platform}/lib")
+  set(_oak_root "${SCORE_DEPTHCAM_SDK_DIR}/oaksdk/libs/${_oak_platform}")
+
+  ### The platform's own headers first -- PointCloudExports.h in particular must
+  ### be the local one -- then Linux's to fill the gaps: the macOS and Windows
+  ### trees ship 29 headers against Linux's 52, and the SDK as shipped does not
+  ### compile there (Configuration.h includes a HardwareSerializer.h that is in
+  ### neither). The missing 23 are the portable half of the library.
+  set(_oak_include
+    "${_oak_root}/include/pointcloud-1.0.0"
+    "${SCORE_DEPTHCAM_SDK_DIR}/oaksdk/libs/ubuntu/include/pointcloud-1.0.0")
+
+  if(WIN32)
+    set(_oak_link "${_oak_root}/lib/pointcloud.lib")
+    set(_oak_runtime "${_oak_root}/lib/pointcloud.dll")
+  elseif(APPLE)
+    set(_oak_link "${_oak_root}/lib/libpointcloud.dylib")
+    set(_oak_runtime "${_oak_link}")
+  else()
+    set(_oak_link "${_oak_root}/lib/libpointcloud.so")
+    set(_oak_runtime "${_oak_link}")
+  endif()
+
+  if(NOT EXISTS "${_oak_link}")
+    message(STATUS
+      "score-addon-orbbec: no Oak SDK binary at ${_oak_link}, skipping the Oak backend")
+  else()
+    add_library(score_depthcam_oak MODULE Oak/OakBackend.cpp)
+    target_link_libraries(score_depthcam_oak PRIVATE "${_oak_link}")
+    target_include_directories(score_depthcam_oak SYSTEM PRIVATE ${_oak_include})
+
+    # See Oak/compat/oak_cxx17_compat.h.
+    if(MSVC)
+      target_compile_options(score_depthcam_oak PRIVATE
+        "/FI${CMAKE_CURRENT_LIST_DIR}/Oak/compat/oak_cxx17_compat.h")
+    else()
+      target_compile_options(score_depthcam_oak PRIVATE
+        "SHELL:-include ${CMAKE_CURRENT_LIST_DIR}/Oak/compat/oak_cxx17_compat.h")
+    endif()
+
+    if(MSVC)
+      # MSVC, not WIN32: cl/link-only flags, and this tree is also built under
+      # msys2.
+      #
+      # The dynamic CRT, alone in this package: SCORE_DEPTHCAM_BACKENDS_ONLY
+      # otherwise forces /MT, and pointcloud.dll imports MSVCP140 while
+      # CameraSystem::scan() hands us a std::vector we destroy -- two CRTs would
+      # free it against the wrong heap on the first enumeration. The
+      # redistributable is therefore a requirement of this backend.
+      set_property(TARGET score_depthcam_oak PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
+      # Delay-load so backend_init() can load the DLL by full path first: the
+      # process search order does not include the directory a module came from.
+      target_link_options(score_depthcam_oak PRIVATE "/DELAYLOAD:pointcloud.dll")
+      target_link_libraries(score_depthcam_oak PRIVATE delayimp)
+    endif()
+
+    score_depthcam_setup_backend(score_depthcam_oak)
+    score_depthcam_install_udev_rules("${CMAKE_CURRENT_LIST_DIR}/Oak/udev")
+
+    # The SDK itself, beside the backend, where $ORIGIN / @loader_path find it.
+    add_custom_command(TARGET score_depthcam_oak POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${_oak_runtime}" "${SCORE_DEPTHCAM_BACKEND_DIR}/"
+      VERBATIM)
+
+    if(APPLE)
+      # libpointcloud.dylib asks for @rpath/libusb-1.0.0.dylib, so ship the copy
+      # the SDK bundles. No install_name_tool -add_rpath: the vendor's dylib
+      # already carries LC_RPATH @loader_path, and adding it again is a hard
+      # error ("would duplicate path"). Checked below so an SDK drop without it
+      # is noticed rather than silently unloadable.
+      add_custom_command(TARGET score_depthcam_oak POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${_oak_root}/lib/libusb-1.0.0.dylib" "${SCORE_DEPTHCAM_BACKEND_DIR}/"
+        VERBATIM)
+
+      execute_process(
+        COMMAND otool -l "${_oak_root}/lib/libpointcloud.dylib"
+        OUTPUT_VARIABLE _oak_otool ERROR_QUIET)
+      if(NOT _oak_otool MATCHES "@loader_path")
+        message(WARNING
+          "score-addon-orbbec: the Oak SDK's libpointcloud.dylib has no "
+          "@loader_path rpath, so it will not find the libusb shipped beside "
+          "it. The backend will load and then fail to open a camera.")
+      endif()
+    endif()
+
+    # The two trees the SDK loads by path: its camera plug-ins and the
+    # .conf/.dml model descriptions, without which a camera enumerates and then
+    # fails to connect. Under oak/ so they cannot collide with another SDK's
+    # runtime files; backend_init() points POINTCLOUD_{PLUGIN,CONF}_PATH here.
+    add_custom_command(TARGET score_depthcam_oak POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${_oak_root}/lib/plugin" "${SCORE_DEPTHCAM_BACKEND_DIR}/oak/plugin"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory
+              "${_oak_root}/share/pointcloud-1.0.0/conf"
+              "${SCORE_DEPTHCAM_BACKEND_DIR}/oak/conf"
+      VERBATIM)
+  endif()
+elseif(SCORE_DEPTHCAM_BUILD_OAK AND NOT _oak_platform)
+  message(STATUS
+    "score-addon-orbbec: Oak3DVision ships no libPointCloud binary for this "
+    "platform, skipping the Oak backend")
+endif()
+
+### --- Luxonis OAK (depthai-core) -------------------------------------------
+###
+### A nested project rather than add_subdirectory, which depthai's own
+### documentation says is unsupported: it resolves ~20 dependencies through a
+### vcpkg it bootstraps itself, and that has to be the toolchain file of the
+### top-level configure. So ExternalProject_Add gives it its own.
+###
+### It is also the only SDK here that needs the network at build time (vcpkg,
+### plus the MyriadX and RVC4 firmware it embeds), leaves about a gigabyte in
+### CMAKE_BINARY_DIR, and adds ~30 MB to the package. Hence the default below:
+### on only when the package is what was asked for, so that a developer who
+### cloned this repository recursively does not turn every score build into a
+### vcpkg bootstrap. Work on this backend with -DSCORE_DEPTHCAM_BUILD_DEPTHAI=ON.
+### See DepthAI/README.md.
+if(SCORE_DEPTHCAM_BACKENDS_ONLY)
+  set(SCORE_DEPTHCAM_DEPTHAI_DEFAULT ON)
+else()
+  set(SCORE_DEPTHCAM_DEPTHAI_DEFAULT OFF)
+endif()
+option(SCORE_DEPTHCAM_BUILD_DEPTHAI "Build the Luxonis OAK backend"
+       ${SCORE_DEPTHCAM_DEPTHAI_DEFAULT})
+
+### A universal macOS build cannot include depthai: a vcpkg triplet names one
+### architecture, so a nested configure handed `x86_64;arm64` gives up with
+### "Unable to determine target architecture ... Continuing without vcpkg" and
+### then fails much later on a missing dependency. Skipped rather than fatal --
+### score itself is built universal.
+###
+### Distinct architectures, not slices: CMAKE_OSX_ARCHITECTURES_KEYS is the list
+### collapsed by the top-level CMakeLists, so a fat x86_64 + x86_64h build is one
+### architecture and a generic x86_64 dylib links into both slices.
+set(_dai_multiarch OFF)
+set(_dai_arch "")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+  list(LENGTH CMAKE_OSX_ARCHITECTURES_KEYS _dai_narch)
+  if(_dai_narch GREATER 1)
+    set(_dai_multiarch ON)
+  else()
+    # vcpkg knows x86_64 and arm64 and nothing about sub-architectures.
+    list(GET CMAKE_OSX_ARCHITECTURES_KEYS 0 _dai_key)
+    if(_dai_key STREQUAL "aarch64")
+      set(_dai_arch "arm64")
+    else()
+      set(_dai_arch "x86_64")
+    endif()
+  endif()
+endif()
+
+### Nor msys2: vcpkg selects its triplet from the host platform rather than the
+### compiler, so on Windows it picks x64-windows whatever CMAKE_CXX_COMPILER
+### says and produces MSVC-ABI libraries that will not link into a mingw module.
+### depthai ships no mingw triplet.
+if(SCORE_DEPTHCAM_BUILD_DEPTHAI AND _dai_multiarch)
+  message(STATUS
+    "score-addon-orbbec: skipping the Luxonis OAK backend, which vcpkg cannot "
+    "build for more than one architecture at a time "
+    "(CMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES})")
+elseif(SCORE_DEPTHCAM_BUILD_DEPTHAI AND WIN32 AND NOT MSVC)
+  message(STATUS
+    "score-addon-orbbec: skipping the Luxonis OAK backend: depthai resolves its "
+    "dependencies through vcpkg, which selects an MSVC triplet on Windows and "
+    "has none for mingw. Build it with MSVC.")
+elseif(SCORE_DEPTHCAM_BUILD_DEPTHAI
+   AND EXISTS "${SCORE_DEPTHCAM_SDK_DIR}/depthai-core/CMakeLists.txt")
+  include(ExternalProject)
+
+  set(_dai_prefix "${CMAKE_BINARY_DIR}/depthai")
+  set(_dai_install "${_dai_prefix}/install")
+
+  # On Windows the import library and the DLL land in different directories
+  # (LIBDIR and BINDIR), and the dynamic dependencies -- libusb, which the
+  # Windows triplet keeps shared -- sit beside the DLL. Both are searched.
+  if(APPLE)
+    set(_dai_lib "${_dai_install}/lib/libdepthai-core.dylib")
+  elseif(WIN32)
+    set(_dai_lib "${_dai_install}/lib/depthai-core.lib")
+  else()
+    set(_dai_lib "${_dai_install}/lib/libdepthai-core.so")
+  endif()
+  set(_dai_runtime_dirs "${_dai_install}/lib")
+  if(WIN32)
+    list(APPEND _dai_runtime_dirs "${_dai_install}/bin")
+  endif()
+
+  # The backend's include path before the ExternalProject has run; some
+  # generators dislike a target whose include directory does not exist.
+  # add_dependencies gets the ordering right.
+  file(MAKE_DIRECTORY "${_dai_install}/include")
+
+  ### Forwarded only when they have a value: `-DCMAKE_OSX_ARCHITECTURES=` with
+  ### nothing after it defines the cache entry as the empty string, and vcpkg's
+  ### toolchain then cannot determine the target architecture, warns "Continuing
+  ### without vcpkg" and builds no dependencies at all -- surfacing much later
+  ### as `Could not find a package configuration file provided by "lz4"`.
+  ###
+  ### CMAKE_MAKE_PROGRAM matters only on Windows: ExternalProject forwards the
+  ### generator but not the program driving it, and CMake finds ninja through
+  ### the Visual Studio installation rather than the PATH there.
+  set(_dai_cmake_args
+    -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+    -DCMAKE_BUILD_TYPE=$<IF:$<CONFIG:Debug>,RelWithDebInfo,$<CONFIG>>
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
+  foreach(_var CMAKE_C_COMPILER CMAKE_CXX_COMPILER CMAKE_MAKE_PROGRAM
+               CMAKE_OSX_DEPLOYMENT_TARGET CMAKE_OSX_SYSROOT)
+    if(${_var})
+      list(APPEND _dai_cmake_args "-D${_var}=${${_var}}")
+    endif()
+  endforeach()
+  # Not CMAKE_OSX_ARCHITECTURES verbatim: see _dai_arch above.
+  if(_dai_arch)
+    list(APPEND _dai_cmake_args "-DCMAKE_OSX_ARCHITECTURES=${_dai_arch}")
+  endif()
+
+  ExternalProject_Add(depthai_core_ext
+    SOURCE_DIR "${SCORE_DEPTHCAM_SDK_DIR}/depthai-core"
+    PREFIX "${_dai_prefix}"
+    BINARY_DIR "${_dai_prefix}/build"
+    INSTALL_DIR "${_dai_install}"
+    DOWNLOAD_COMMAND ""
+    UPDATE_COMMAND ""
+    CMAKE_ARGS
+      ${_dai_cmake_args}
+      -DBUILD_SHARED_LIBS=ON
+      -DDEPTHAI_INSTALL=ON
+      # Everything optional off: none of OpenCV, protobuf, curl, mp4v2,
+      # AprilTag, PCL or the Foxglove bridge is reachable through
+      # depthcam_abi.h. The device firmware is not optional -- without it there
+      # is no camera, and its RVC4 half is what makes the OAK-4 work.
+      -DDEPTHAI_BUILD_EXAMPLES=OFF
+      -DDEPTHAI_BUILD_TESTS=OFF
+      -DDEPTHAI_BUILD_PYTHON=OFF
+      -DDEPTHAI_BUILD_DOCS=OFF
+      -DDEPTHAI_CLANG_FORMAT=OFF
+      -DDEPTHAI_CLANG_TIDY=OFF
+      -DDEPTHAI_OPENCV_SUPPORT=OFF
+      -DDEPTHAI_PCL_SUPPORT=OFF
+      -DDEPTHAI_ENABLE_CURL=OFF
+      -DDEPTHAI_ENABLE_PROTOBUF=OFF
+      -DDEPTHAI_ENABLE_MP4V2=OFF
+      -DDEPTHAI_ENABLE_APRIL_TAG=OFF
+      -DDEPTHAI_ENABLE_KOMPUTE=OFF
+      -DDEPTHAI_ENABLE_BACKWARD=OFF
+      -DDEPTHAI_DYNAMIC_CALIBRATION_SUPPORT=OFF
+    BUILD_BYPRODUCTS "${_dai_lib}"
+    USES_TERMINAL_CONFIGURE ON
+    USES_TERMINAL_BUILD ON
+    USES_TERMINAL_INSTALL ON
+  )
+
+  add_library(score_depthcam_depthai MODULE DepthAI/DepthAiBackend.cpp)
+  add_dependencies(score_depthcam_depthai depthai_core_ext)
+  target_include_directories(score_depthcam_depthai SYSTEM PRIVATE
+    "${_dai_install}/include")
+  target_link_libraries(score_depthcam_depthai PRIVATE "${_dai_lib}")
+
+  # MSVC, not WIN32: cl/link-only flags, and under msys2 /DELAYLOAD would be
+  # handed to ld as a source file and `delayimp` does not exist. A mingw build
+  # relies on the package directory being on the search path instead.
+  if(MSVC)
+    # The dynamic CRT, as for the Oak backend: depthai's Windows triplet sets
+    # VCPKG_CRT_LINKAGE dynamic, and every frame is a std::shared_ptr allocated
+    # in the DLL and released here, so two CRTs would free against the wrong
+    # heap. The redistributable is a requirement of this backend.
+    set_property(TARGET score_depthcam_depthai PROPERTY
+      MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
+    # Delay-load so backend_init() can load the DLL by full path first; one
+    # LOAD_WITH_ALTERED_SEARCH_PATH covers the chain, libusb-1.0.dll included.
+    target_link_options(score_depthcam_depthai PRIVATE "/DELAYLOAD:depthai-core.dll")
+    target_link_libraries(score_depthcam_depthai PRIVATE delayimp)
+  endif()
+
+  score_depthcam_setup_backend(score_depthcam_depthai)
+  score_depthcam_install_udev_rules("${CMAKE_CURRENT_LIST_DIR}/DepthAI/udev")
+
+  # libdepthai-core and the libusb it links, beside the backend where $ORIGIN
+  # and @loader_path find them. See Deployment/CopyDepthaiRuntime.cmake.
+  add_custom_command(TARGET score_depthcam_depthai POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            "-DIN=${_dai_runtime_dirs}"
+            -DOUT=${SCORE_DEPTHCAM_BACKEND_DIR}
+            -P "${CMAKE_CURRENT_LIST_DIR}/../Deployment/CopyDepthaiRuntime.cmake"
+    VERBATIM)
+elseif(SCORE_DEPTHCAM_BUILD_DEPTHAI)
+  message(STATUS
+    "score-addon-orbbec: 3rdparty/depthai-core is not checked out, skipping "
+    "the Luxonis OAK backend")
+endif()
+
 unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)
 
 ### One target that builds whatever backends this configuration enabled, so

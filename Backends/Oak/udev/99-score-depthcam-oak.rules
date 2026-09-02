@@ -1,0 +1,25 @@
+# Oak3DVision Oak CDK / QCDK — udev rules for the score depth-camera backend.
+#
+# libPointCloud talks to these modules over raw USB (libusb bulk and control
+# transfers), so without these the device nodes stay root-owned, the SDK reports
+# no cameras, and the symptom is indistinguishable from nothing being plugged
+# in.
+#
+# 14b4:9108 is the Oak CDK (MLX75027, handled by the SDK's Oakcdk plug-in) and
+# 14b4:9107 the Oak QCDK (MLX75026, OakQcdk). The vendor's own rules --
+# script/88-OakCDK.rules and 89-OakQCDK.rules in the SDK -- cover the same two
+# ids with MODE="0666" alone; TAG+="uaccess" is added here for the same reason
+# as in the other rules in this directory, so that systemd hands the logged-in
+# user an ACL rather than the device being world-writable on a multi-user
+# machine.
+#
+# Deliberately no ACTION!="add" guard: `udevadm trigger` fires *change* events
+# by default, so an add-only rule silently does nothing until the camera is
+# physically replugged.
+
+SUBSYSTEM!="usb", GOTO="score_oak_end"
+
+ATTR{idVendor}=="14b4", ATTR{idProduct}=="9108", MODE="0666", TAG+="uaccess"
+ATTR{idVendor}=="14b4", ATTR{idProduct}=="9107", MODE="0666", TAG+="uaccess"
+
+LABEL="score_oak_end"
