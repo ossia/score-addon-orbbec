@@ -232,8 +232,25 @@ void BackendRegistry::load()
   }
 }
 
-void BackendRegistry::unload()
+void BackendRegistry::shutdown()
 {
+  // Every SDK here owns background threads that outlive the last device: a
+  // hot-plug watcher polling libusb, the OrbbecSDK's GVCP network discovery,
+  // spdlog's flusher... They only stop when the SDK context is destroyed, and
+  // this registry is a function-local static, so without this the contexts were
+  // destroyed by __cxa_finalize during exit(). By then the backend library's
+  // *other* globals may already be gone -- easylogging++'s registered-logger
+  // map in librealsense's case -- and the watcher thread, still running one
+  // last poll, faults on them:
+  //
+  //   thread: el::base::RegisteredLoggers::get   <- statics already destroyed
+  //           librealsense::platform::usb_context::usb_context
+  //           librealsense::polling_device_watcher::polling
+  //   main:   active_object<...>::stop
+  //           ~rs2_context  <- from exit()
+  //
+  // So tear the contexts down explicitly, while the process is still healthy
+  // and the threads have everything they expect to find.
   for(auto& b : m_backends)
   {
     if(!b.api)
@@ -241,8 +258,18 @@ void BackendRegistry::unload()
     if(b.api->set_changed_callback)
       b.api->set_changed_callback(nullptr, nullptr);
     if(b.initialized && b.api->shutdown)
+    {
       b.api->shutdown();
+      b.initialized = false;
+    }
   }
+  m_changed = {};
+}
+
+void BackendRegistry::unload()
+{
+  shutdown();
+
   m_backends.clear();
   m_libs.clear();
   m_loaded = false;
