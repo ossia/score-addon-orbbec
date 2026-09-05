@@ -2,6 +2,7 @@
 
 #include <DepthCamera/Backend/BackendRegistry.hpp>
 
+#include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
 
@@ -93,6 +94,16 @@ ApplicationPlugin::ApplicationPlugin(const score::GUIApplicationContext& ctx)
     QMetaObject::invokeMethod(this, [this] { rescan(); }, Qt::QueuedConnection);
   });
 
+  // The SDK contexts keep polling threads alive and must be destroyed before
+  // the backend libraries' globals are; doing it from a static destructor at
+  // exit() is too late and segfaults. aboutToQuit is the last point at which
+  // the process is unambiguously healthy: the event loop has returned, every
+  // document (and therefore every open camera) is closed.
+  if(qApp)
+    connect(
+        qApp, &QCoreApplication::aboutToQuit, this,
+        [] { BackendRegistry::instance().shutdown(); });
+
   // Hot-plug notifications only cover changes, so anything already connected at
   // startup would otherwise never be reported.
   rescan();
@@ -101,6 +112,10 @@ ApplicationPlugin::ApplicationPlugin(const score::GUIApplicationContext& ctx)
 ApplicationPlugin::~ApplicationPlugin()
 {
   BackendRegistry::instance().setChangedCallback({});
+
+  // Idempotent, and covers the paths that never reach aboutToQuit -- headless
+  // runs, and anything that tears the plug-ins down without exec().
+  BackendRegistry::instance().shutdown();
 }
 
 void ApplicationPlugin::rescan()

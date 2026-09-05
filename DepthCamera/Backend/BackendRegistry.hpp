@@ -42,6 +42,15 @@ public:
 
   /// Discover and initialise everything on the search path. Idempotent.
   void load();
+
+  /**
+   * @brief Shut the SDKs down, keeping the libraries mapped. Idempotent.
+   *
+   * Must run while the process is still healthy -- see the note in
+   * BackendRegistry::shutdown().
+   */
+  void shutdown();
+
   void unload();
 
   const std::vector<Backend>& backends() const noexcept { return m_backends; }
