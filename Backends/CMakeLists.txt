@@ -54,17 +54,12 @@ endfunction()
 ### it is in no export set either -- a chain with no end that only exists to
 ### produce files no one asked for.
 ###
-### The suppression is a directory-scoped *variable*, not a bare override of the
-### command: command overrides are global and permanent -- there is no way to
-### hand the builtin back, since a second override makes _install resolve to the
-### first override rather than to the builtin. A bare override therefore leaked
-### out of this tree and silently discarded every install rule in whatever the
-### host project configured afterwards. score adds src/addons before src/app, so
-### it produced a package containing nothing but the LICENSE.
-###
-### Variables are inherited by subdirectories and invisible to sibling trees, and
-### a function body resolves them against its caller's scope, so this suppresses
-### install() exactly within the SDK subtrees added below and nowhere else.
+### Gated on a directory-scoped variable rather than by overriding install()
+### outright: command overrides are global and permanent, since a second override
+### makes _install resolve to the first rather than to the builtin. A variable is
+### inherited by subdirectories, invisible to sibling trees, and resolved against
+### the caller's scope inside a function body, so this reaches the SDK subtrees
+### added below and nothing else.
 set(SCORE_DEPTHCAM_SUPPRESS_INSTALL 1)
 function(install)
   if(NOT SCORE_DEPTHCAM_SUPPRESS_INSTALL)
