@@ -52,9 +52,24 @@ endfunction()
 ### librealsense exports realsense2, realsense2 links the `usb` target we hand
 ### it, and CMake then refuses the export set because the vendored libusb behind
 ### it is in no export set either -- a chain with no end that only exists to
-### produce files no one asked for. Same override as above, same directory
-### scope, so it reaches the SDK subtrees added below and nothing else.
+### produce files no one asked for.
+###
+### The suppression is a directory-scoped *variable*, not a bare override of the
+### command: command overrides are global and permanent -- there is no way to
+### hand the builtin back, since a second override makes _install resolve to the
+### first override rather than to the builtin. A bare override therefore leaked
+### out of this tree and silently discarded every install rule in whatever the
+### host project configured afterwards. score adds src/addons before src/app, so
+### it produced a package containing nothing but the LICENSE.
+###
+### Variables are inherited by subdirectories and invisible to sibling trees, and
+### a function body resolves them against its caller's scope, so this suppresses
+### install() exactly within the SDK subtrees added below and nowhere else.
+set(SCORE_DEPTHCAM_SUPPRESS_INSTALL 1)
 function(install)
+  if(NOT SCORE_DEPTHCAM_SUPPRESS_INSTALL)
+    _install(${ARGV})
+  endif()
 endfunction()
 
 ### Settings every backend needs, whatever SDK it wraps.
