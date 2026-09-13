@@ -78,7 +78,7 @@ if(SCORE_DEPTHCAM_BACKENDS_ONLY)
 endif()
 
 if(NOT SCORE_DEPTHCAM_BACKENDS_ONLY AND NOT TARGET score_lib_base)
-  include("${SCORE_SOURCE_DIR}/cmake/ScoreExternalAddon.cmake")
+  include(ScoreExternalAddon)
 endif()
 
 project(score_addon_orbbec LANGUAGES C CXX)
