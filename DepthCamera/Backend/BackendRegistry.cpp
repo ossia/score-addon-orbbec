@@ -8,6 +8,8 @@
 #include <QFileInfo>
 #include <QSettings>
 
+#include <algorithm>
+
 #if defined(_WIN32)
 #include <windows.h>
 #else
@@ -208,7 +210,10 @@ void BackendRegistry::load()
       }
 
       if(api->set_changed_callback)
+      {
         api->set_changed_callback(&BackendRegistry::onChanged, this);
+        b.hotplug = true;
+      }
 
       qDebug() << "[depthcam] loaded backend" << b.name << "from" << full;
 
@@ -303,6 +308,13 @@ void BackendRegistry::enumerate(
     };
     b.api->enumerate(trampoline, const_cast<void*>(static_cast<const void*>(&f)));
   }
+}
+
+bool BackendRegistry::needsRescanOnDemand() const noexcept
+{
+  return std::any_of(m_backends.begin(), m_backends.end(), [](const Backend& b) {
+    return b.initialized && !b.hotplug;
+  });
 }
 
 void BackendRegistry::setChangedCallback(std::function<void()> f)

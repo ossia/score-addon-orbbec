@@ -20,6 +20,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -308,6 +309,38 @@ struct EnumEntry
   std::string uri, serial;
 };
 
+/// The serial of every camera this process holds open, by index. libk4a
+/// refuses to open a camera twice, so enumerating reads these instead of
+/// opening the camera again.
+std::mutex g_open_mutex;
+std::vector<std::pair<uint32_t, std::string>> g_open_serials;
+
+std::optional<std::string> open_serial(uint32_t index)
+{
+  std::lock_guard lock{g_open_mutex};
+  for(const auto& [i, serial] : g_open_serials)
+    if(i == index)
+      return serial;
+  return std::nullopt;
+}
+
+void remember_open(uint32_t index, std::string serial)
+{
+  std::lock_guard lock{g_open_mutex};
+  g_open_serials.emplace_back(index, std::move(serial));
+}
+
+void forget_open(uint32_t index)
+{
+  std::lock_guard lock{g_open_mutex};
+  for(auto it = g_open_serials.begin(); it != g_open_serials.end(); ++it)
+    if(it->first == index)
+    {
+      g_open_serials.erase(it);
+      return;
+    }
+}
+
 // --- controls ---------------------------------------------------------------
 
 /**
@@ -364,6 +397,7 @@ struct ControlEntry
 struct depthcam_device
 {
   k4a_device_t dev{};
+  uint32_t index{};
   k4a_calibration_t calibration{};
   k4a_transformation_t transformation{};
 
@@ -885,13 +919,19 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
     // briefly and closed again. Unlike the Orbbec SDK there is no metadata-only
     // path, but this happens once per browser refresh and the handle is not
     // retained.
-    k4a_device_t dev{};
-    if(g_k4a.device_open(i, &dev) != K4A_RESULT_SUCCEEDED)
-      continue;
-
     EnumEntry e;
-    e.serial = serial_of(dev);
-    g_k4a.device_close(dev);
+    if(auto serial = open_serial(i))
+    {
+      e.serial = *serial;
+    }
+    else
+    {
+      k4a_device_t dev{};
+      if(g_k4a.device_open(i, &dev) != K4A_RESULT_SUCCEEDED)
+        continue;
+      e.serial = serial_of(dev);
+      g_k4a.device_close(dev);
+    }
 
     e.uri = e.serial.empty() ? ("k4a:index:" + std::to_string(i))
                              : ("k4a:sn:" + e.serial);
@@ -908,11 +948,6 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
     cb(&info, user);
   }
   return 1;
-}
-
-void backend_set_changed_callback(depthcam_changed_cb, void*)
-{
-  // libk4a has no hot-plug notification.
 }
 
 /// Nearest supported colour mode for a requested height.
@@ -1020,6 +1055,8 @@ depthcam_device* backend_open(const char* uri, const depthcam_open_config* confi
     set_error("could not open the Azure Kinect (is it on a USB3 port?)");
     return nullptr;
   }
+  dev->index = index;
+  remember_open(index, serial_of(dev->dev));
 
   dev->want_imu = (config->streams & DEPTHCAM_STREAM_IMU) != 0;
 
@@ -1091,7 +1128,10 @@ void backend_close(depthcam_device* dev)
     return;
   backend_stop(dev);
   if(dev->dev)
+  {
     g_k4a.device_stop_cameras(dev->dev);
+    forget_open(dev->index);
+  }
   delete dev;
 }
 
@@ -1166,7 +1206,9 @@ const depthcam_backend_v1 g_backend{
     .init = &backend_init,
     .shutdown = &backend_shutdown,
     .enumerate = &backend_enumerate,
-    .set_changed_callback = &backend_set_changed_callback,
+    // No hot-plug notification in the SDK: the host enumerates again when
+    // the device browser asks.
+    .set_changed_callback = nullptr,
     .open = &backend_open,
     .close = &backend_close,
     .start = &backend_start,

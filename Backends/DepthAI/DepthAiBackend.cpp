@@ -717,11 +717,6 @@ int backend_enumerate(depthcam_enumerate_cb cb, void* user)
   }
 }
 
-void backend_set_changed_callback(depthcam_changed_cb, void*)
-{
-  // depthai-core has no hot-plug notification; the host re-enumerates on demand.
-}
-
 std::optional<dai::DeviceInfo> find_device(const Address& addr)
 {
   const auto all = dai::Device::getAllAvailableDevices();
@@ -1287,7 +1282,9 @@ const depthcam_backend_v1 g_backend{
     .init = &backend_init,
     .shutdown = &backend_shutdown,
     .enumerate = &backend_enumerate,
-    .set_changed_callback = &backend_set_changed_callback,
+    // No hot-plug notification in the SDK: the host enumerates again when
+    // the device browser asks.
+    .set_changed_callback = nullptr,
     .open = &backend_open,
     .close = &backend_close,
     .start = &backend_start,
