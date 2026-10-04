@@ -37,8 +37,10 @@ void warnIfMissingUdevRules()
     if(!d.exists())
       continue;
     if(!d.entryList(
-             {QStringLiteral("*obsensor*"), QStringLiteral("*freenect*"),
-              QStringLiteral("*k4a*")},
+             {QStringLiteral("*score-depthcam*"), QStringLiteral("*obsensor*"),
+              QStringLiteral("*freenect*"), QStringLiteral("*k4a*"),
+              QStringLiteral("*realsense*"), QStringLiteral("*movidius*"),
+              QStringLiteral("*luxonis*"), QStringLiteral("*depthai*")},
              QDir::Files)
             .isEmpty())
       return; // some rules are installed; the list really is empty

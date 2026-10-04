@@ -36,6 +36,9 @@ public:
     QString path;         ///< the library it came from
     QString resource_dir; ///< passed to init(); where the SDK's blobs live
     bool initialized{};
+    /// The backend reports hot-plug itself (set_changed_callback). The others
+    /// only see a camera when asked: see needsRescanOnDemand().
+    bool hotplug{};
   };
 
   static BackendRegistry& instance();
@@ -63,6 +66,10 @@ public:
 
   /// Ask every backend for its devices.
   void enumerate(const std::function<void(const depthcam_device_info&)>& f) const;
+
+  /// Some backend cannot report hot-plug, so its devices are only known by
+  /// enumerating again.
+  bool needsRescanOnDemand() const noexcept;
 
   /// Invoked (on an arbitrary thread) when any backend reports a hot-plug.
   void setChangedCallback(std::function<void()> f);
