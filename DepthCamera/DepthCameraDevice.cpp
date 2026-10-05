@@ -288,9 +288,8 @@ InputFactory::getEnumerators(const score::DocumentContext& ctx) const
   auto& registry = BackendRegistry::instance();
   registry.load();
 
-  // The device browser asks every time it shows this protocol. A camera on a
-  // backend without hot-plug (depthai, Oak, k4a, freenect...) plugged in since
-  // the last enumeration is only seen by enumerating again.
+  // Called each time the device browser shows this protocol: backends without
+  // hot-plug only see newly plugged cameras by enumerating again.
   if(registry.needsRescanOnDemand())
     ctx.app.guiApplicationPlugin<ApplicationPlugin>().rescan();
 

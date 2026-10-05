@@ -309,9 +309,8 @@ struct EnumEntry
   std::string uri, serial;
 };
 
-/// The serial of every camera this process holds open, by index. libk4a
-/// refuses to open a camera twice, so enumerating reads these instead of
-/// opening the camera again.
+/// Serials of the cameras this process holds open, by index: libk4a cannot
+/// open a camera twice, so enumeration reads them from here.
 std::mutex g_open_mutex;
 std::vector<std::pair<uint32_t, std::string>> g_open_serials;
 
@@ -1206,8 +1205,7 @@ const depthcam_backend_v1 g_backend{
     .init = &backend_init,
     .shutdown = &backend_shutdown,
     .enumerate = &backend_enumerate,
-    // No hot-plug notification in the SDK: the host enumerates again when
-    // the device browser asks.
+    // The SDK has no hot-plug notification.
     .set_changed_callback = nullptr,
     .open = &backend_open,
     .close = &backend_close,
