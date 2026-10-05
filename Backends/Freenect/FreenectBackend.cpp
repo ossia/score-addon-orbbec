@@ -850,8 +850,7 @@ const depthcam_backend_v1 g_backend{
     .init = &backend_init,
     .shutdown = &backend_shutdown,
     .enumerate = &backend_enumerate,
-    // No hot-plug notification in the SDK: the host enumerates again when
-    // the device browser asks.
+    // The SDK has no hot-plug notification.
     .set_changed_callback = nullptr,
     .open = &backend_open,
     .close = &backend_close,
