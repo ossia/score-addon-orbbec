@@ -382,8 +382,7 @@ InputSettingsWidget::InputSettingsWidget(QWidget* parent)
   if(BackendRegistry::instance().backends().empty())
   {
     auto warn = new QLabel{
-        tr("No camera backend is installed.\nInstall one from the package "
-           "manager to use this device."),
+        tr("No camera backend installed. Install one in the package manager."),
         this};
     warn->setWordWrap(true);
     layout->addRow(warn);
